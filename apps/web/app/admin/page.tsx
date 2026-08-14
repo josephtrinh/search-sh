@@ -1,0 +1,2 @@
+import { AdminDashboard } from "@/components/admin-dashboard";
+export default function AdminPage() { return <main className="admin-page"><section className="admin-hero"><div><p className="eyebrow">INTERNAL EVALUATOR</p><h1>Search quality, made visible.</h1></div><p>Build indexes, tune signal weights, label relevance, and inspect system health from one local workspace.</p></section><AdminDashboard /></main>; }

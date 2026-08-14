@@ -1,0 +1,33 @@
+services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.45.1
+    environment:
+      MEILI_ENV: development
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-local-development-master-key}
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "127.0.0.1:7700:7700"
+    volumes:
+      - meili_data:/meili_data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:7700/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8.2-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  meili_data:
+  redis_data:

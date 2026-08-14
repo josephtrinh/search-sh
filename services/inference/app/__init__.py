@@ -1,0 +1,1 @@
+"""SampleHub inference service."""

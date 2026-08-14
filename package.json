@@ -1,0 +1,27 @@
+{
+  "name": "samplehub-search",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.12.4",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "format": "prettier --write .",
+    "infra:up": "docker compose up -d meilisearch redis",
+    "infra:down": "docker compose down",
+    "inference:dev": "uv run --directory services/inference --extra model uvicorn app.main:app --host 127.0.0.1 --port 8100 --reload",
+    "inference:test": "uv run --directory services/inference pytest"
+  },
+  "devDependencies": {
+    "prettier": "3.6.2",
+    "turbo": "2.5.6",
+    "typescript": "5.9.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["@nestjs/core", "better-sqlite3", "esbuild", "sharp"]
+  }
+}

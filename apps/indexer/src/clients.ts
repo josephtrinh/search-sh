@@ -1,0 +1,52 @@
+import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { config } from "./config";
+
+export class InferenceClient {
+  async text(texts: string[]): Promise<number[][]> { return this.call("text", { texts, priority: 10 }); }
+  async images(images: Buffer[]): Promise<number[][]> { return this.call("images", { images: images.map((image) => image.toString("base64")), priority: 10 }); }
+  private async call(path: string, body: unknown): Promise<number[][]> {
+    const response = await fetch(`${config.INFERENCE_URL}/v1/embed/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!response.ok) throw new Error(`Inference ${path} failed: ${(await response.text()).slice(0, 500)}`);
+    return ((await response.json()) as { embeddings: number[][] }).embeddings;
+  }
+}
+
+export class ImageSource {
+  private readonly s3 = new S3Client({ region: config.AWS_REGION, credentials: { accessKeyId: config.AWS_ACCESS_KEY_ID, secretAccessKey: config.AWS_SECRET_ACCESS_KEY } });
+  async get(keyOrUrl: string): Promise<Buffer> {
+    const base = config.AWS_BUCKET_URL.replace(/\/$/, "") + "/";
+    const key = decodeURIComponent(keyOrUrl.startsWith(base) ? keyOrUrl.slice(base.length) : keyOrUrl);
+    const result = await this.s3.send(new GetObjectCommand({ Bucket: config.AWS_BUCKET_NAME, Key: key }));
+    if (!result.Body) throw new Error("S3 object had no body");
+    return Buffer.from(await result.Body.transformToByteArray());
+  }
+}
+
+export class MeiliClient {
+  private async request(method: string, path: string, body?: unknown): Promise<any> {
+    const response = await fetch(`${config.MEILI_URL}${path}`, { method, headers: { Authorization: `Bearer ${config.MEILI_MASTER_KEY}`, "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    if (!response.ok) throw new Error(`Meilisearch ${method} ${path}: ${(await response.text()).slice(0, 500)}`);
+    return response.status === 204 ? undefined : response.json();
+  }
+  async exists(uid: string): Promise<boolean> { const response = await fetch(`${config.MEILI_URL}/indexes/${uid}`, { headers: { Authorization: `Bearer ${config.MEILI_MASTER_KEY}` } }); return response.ok; }
+  async create(uid: string) { await this.wait((await this.request("POST", "/indexes", { uid, primaryKey: "id" })).taskUid); }
+  async configure(uid: string) {
+    const settings = {
+      displayedAttributes: ["id","groupId","brand","normalizedBrand","series","normalizedSeries","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","price","availability","width","height","length","depth","area","updatedAt","thumbnailId","images","attributes"],
+      searchableAttributes: ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","attributes"],
+      filterableAttributes: ["groupId","category","material","color","brand","series","model","surface","edge","sizeGroup","waterAbsorption","fireResistance","price","availability"],
+      sortableAttributes: ["price"], pagination: { maxTotalHits: 10000 }, faceting: { maxValuesPerFacet: 100, sortFacetValuesBy: { "*": "count" } },
+      embedders: { siglip_text: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS }, siglip_image: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS } },
+    };
+    await this.wait((await this.request("PATCH", `/indexes/${uid}/settings`, settings)).taskUid);
+  }
+  async add(uid: string, documents: unknown[]) { await this.wait((await this.request("POST", `/indexes/${uid}/documents?primaryKey=id`, documents)).taskUid); }
+  async deleteDocuments(uid: string, ids: string[]) { if (ids.length) await this.wait((await this.request("POST", `/indexes/${uid}/documents/delete-batch`, ids)).taskUid); }
+  async count(uid: string): Promise<number> { return Number((await this.request("GET", `/indexes/${uid}/stats`)).numberOfDocuments); }
+  async swap(first: string, second: string) { await this.wait((await this.request("POST", "/swap-indexes", [{ indexes: [first, second] }])).taskUid); }
+  async deleteIndex(uid: string) { if (await this.exists(uid)) await this.wait((await this.request("DELETE", `/indexes/${uid}`)).taskUid); }
+  async smoke(uid: string) { await this.request("POST", `/indexes/${uid}/search`, { q: "stone", limit: 1, distinct: "groupId" }); }
+  private async wait(taskUid: number) {
+    for (;;) { const task = await this.request("GET", `/tasks/${taskUid}`); if (task.status === "succeeded") return task; if (task.status === "failed" || task.status === "canceled") throw new Error(`Meilisearch task ${taskUid} ${task.status}: ${JSON.stringify(task.error)}`); await new Promise((resolve) => setTimeout(resolve, 150)); }
+  }
+}
