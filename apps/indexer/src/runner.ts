@@ -7,6 +7,7 @@ import { buildEmbeddingText } from "@samplehub/catalog";
 import { CatalogRepository } from "./catalog";
 import { ImageSource, InferenceClient, MeiliClient } from "./clients";
 import { config } from "./config";
+import { selectEmbeddingImages } from "./image-selection";
 
 export class IndexRunner {
   private readonly catalog = new CatalogRepository(); private readonly inference = new InferenceClient();
@@ -53,9 +54,10 @@ export class IndexRunner {
     const textVectors = await this.inference.text(products.map(buildEmbeddingText)); const documents: unknown[] = [];
     let referenced = 0, embedded = 0, failed = 0;
     for (let index = 0; index < products.length; index++) {
-      const product = products[index]!; const imageVectors: number[][] = []; referenced += product.images.length;
-      for (let offset = 0; offset < product.images.length; offset += 8) {
-        const assets = product.images.slice(offset, offset + 8); const settled = await Promise.allSettled(assets.map((asset) => this.imageSource.get(asset.url)));
+      const product = products[index]!; const imageVectors: number[][] = [];
+      const embeddingImages = selectEmbeddingImages(product, config.IMAGE_EMBEDDING_MODE); referenced += embeddingImages.length;
+      for (let offset = 0; offset < embeddingImages.length; offset += 8) {
+        const assets = embeddingImages.slice(offset, offset + 8); const settled = await Promise.allSettled(assets.map((asset) => this.imageSource.get(asset.url)));
         const buffers: Buffer[] = []; const successfulAssets: typeof assets = [];
         settled.forEach((entry, position) => { if (entry.status === "fulfilled") { buffers.push(entry.value); successfulAssets.push(assets[position]!); }
           else { failed++; this.failure(runId, product.id, assets[position]!.id, "s3_download", String(entry.reason)); } });

@@ -9,7 +9,7 @@
     "preflight": "tsx src/preflight.ts",
     "smoke:search": "tsx src/search-smoke.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/**/*.test.js",
+    "test": "tsx --test src/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

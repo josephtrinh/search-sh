@@ -26,7 +26,7 @@ Preflight verifies the eligible source count, maps one product, reads one source
 
 ## Index runs
 
-Run the API and worker before starting a job in `/admin`. Use full indexing for the first build, after changing the embedding model/revision/dimensions, or after changing indexed fields/settings. Use incremental indexing for routine source updates.
+Run the API and worker before starting a job in `/admin`. Use full indexing for the first build, after changing the embedding model/revision/dimensions, after switching `IMAGE_EMBEDDING_MODE`, or after changing indexed fields/settings. Use incremental indexing for routine source updates.
 
 Cancellation is cooperative at batch boundaries. A cancelled or failed full run never replaces the stable index. Per-image failures remain attached to the run in SQLite. A full build below the 95% image-success threshold fails by design; fix source access, corrupt images, or inference capacity and start a new full run.
 

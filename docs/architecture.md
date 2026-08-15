@@ -32,7 +32,9 @@ Only public merchandising/specification fields are indexed. Internal notes, unit
 The inference service exposes independent normalized text and image embeddings from pinned SigLIP 2. Each document stores:
 
 - `siglip_text`: one vector generated from labeled public product fields
-- `siglip_image`: every successfully generated image vector for that product
+- `siglip_image`: vectors selected by `IMAGE_EMBEDDING_MODE`; `thumbnail` uses the original asset designated by `thumbnail_id` and falls back to the first ordered original, while `all` embeds every image in batches of eight
+
+SigLIP 2 text inputs are truncated to the model-declared context length (64 positions for the pinned model). Identity and primary discovery fields are placed first in the embedding template so they survive truncation; full untruncated fields remain available to Meilisearch keyword retrieval.
 
 The API constructs Meilisearch branches according to the requested mode:
 

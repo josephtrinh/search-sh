@@ -17,6 +17,12 @@ def normalize_rows(values: np.ndarray) -> np.ndarray:
     return values / np.maximum(norms, np.finfo(values.dtype).eps)
 
 
+def text_context_length(model: Any) -> int:
+    text_config = getattr(getattr(model, "config", None), "text_config", None)
+    value = getattr(text_config, "max_position_embeddings", 64)
+    return value if isinstance(value, int) and value > 0 else 64
+
+
 def decode_image(encoded: str, settings: Settings) -> Image.Image:
     try:
         raw = base64.b64decode(encoded, validate=True)
@@ -122,7 +128,13 @@ class SiglipProvider(EmbeddingProvider):
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         self._load()
-        inputs = self._processor(text=texts, return_tensors="pt", padding=True).to(self.device)
+        inputs = self._processor(
+            text=texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=text_context_length(self._model),
+        ).to(self.device)
         with self._torch.inference_mode():
             embeddings = self._model.get_text_features(**inputs)
             embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)

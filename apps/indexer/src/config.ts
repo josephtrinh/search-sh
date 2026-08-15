@@ -12,6 +12,7 @@ const Schema = z.object({
   INFERENCE_URL: z.string().url().default("http://127.0.0.1:8100"), STATE_DATABASE_PATH: z.string().default("./data/search-state.sqlite"),
   AWS_ACCESS_KEY_ID: z.string(), AWS_SECRET_ACCESS_KEY: z.string(), AWS_REGION: z.string(), AWS_BUCKET_NAME: z.string(), AWS_BUCKET_URL: z.string().url(),
   EMBEDDING_DIMENSIONS: z.coerce.number().int().default(768), EMBEDDING_MODEL_ID: z.string().default("google/siglip2-base-patch16-224"), EMBEDDING_MODEL_REVISION: z.string().default("75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"),
+  IMAGE_EMBEDDING_MODE: z.enum(["thumbnail", "all"]).default("thumbnail"),
 });
 const parsed = Schema.parse(process.env);
 export const config = { ...parsed, STATE_DATABASE_PATH: isAbsolute(parsed.STATE_DATABASE_PATH) ? parsed.STATE_DATABASE_PATH : resolve(WORKSPACE_ROOT, parsed.STATE_DATABASE_PATH) };

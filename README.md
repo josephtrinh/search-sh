@@ -30,6 +30,8 @@ pnpm infra:up
 
 Fill `.env` with the read-only source credentials. Keep the Meilisearch key at least 16 characters. If Redis or Meilisearch already occupies the configured port, use the existing compatible service or change both the Compose mapping and `.env`.
 
+`IMAGE_EMBEDDING_MODE=thumbnail` embeds the original image selected by `products.thumbnail_id`, falling back to the first ordered original image. Set it to `all` to embed every product image in batches of eight. Changing this setting requires a full reindex.
+
 Install and start real local inference:
 
 ```bash
