@@ -106,6 +106,55 @@ Confirm the latest run is `completed`, its processed count equals the eligible c
 pnpm infra:down
 ```
 
+## Portable MVP data
+
+Compose stores Meilisearch in the host directory `data/meilisearch` so the MVP can be copied between computers. This directory contains the searchable documents, Meilisearch index structures, and the stored E5 and SigLIP vectors. `data/search-state.sqlite` contains the caption cache and control state, while `data/evaluation` contains local evaluation fixtures.
+
+Installations created before the host bind mount may still have their index in the Docker named volume `search-sh_meili_data`. Changing to an empty host directory does not delete that volume, but Meilisearch will start with an empty database because the old volume is no longer mounted. Avoid a full rebuild by copying the named volume before starting the new Compose configuration.
+
+### One-time named-volume migration
+
+Stop the API and indexer with Ctrl-C so they cannot write during the migration, then stop Meilisearch:
+
+```bash
+docker compose stop meilisearch
+docker volume ls --filter name=meili_data
+mkdir -p data/meilisearch
+docker run --rm --entrypoint /bin/sh \
+  -v search-sh_meili_data:/source:ro \
+  -v "$PWD/data/meilisearch:/destination" \
+  getmeili/meilisearch:v1.45.1 -c 'cp -a /source/. /destination/'
+```
+
+If `docker volume ls` reports a different volume name, use that name before `:/source:ro`. Do not continue if `data/meilisearch` is empty after the copy. The configured Compose mount is `./data/meilisearch:/meili_data`.
+
+Start the service and verify the existing stable index and document count:
+
+```bash
+docker compose up -d meilisearch
+curl http://127.0.0.1:7700/health
+```
+
+Then start the API and check `http://127.0.0.1:8000/v1/admin/index-status`. The stable document count should match the count from before the migration. No full rebuild is required when the files were copied successfully. Keep `search-sh_meili_data` as a rollback copy until search and the document count have been verified; do not run `docker compose down -v` or remove the old volume during migration.
+
+### Copy, move, and restore
+
+Stop the API, indexer, and local infrastructure before creating a portable archive. This gives both Meilisearch and SQLite a consistent on-disk state:
+
+```bash
+pnpm infra:down
+tar -czf samplehub-mvp-data.tar.gz data
+```
+
+Copy the archive and repository to the destination computer. Use the same pinned Meilisearch image version, extract the archive at the repository root so it restores `data/`, and start the services normally:
+
+```bash
+tar -xzf samplehub-mvp-data.tar.gz
+pnpm infra:up
+```
+
+This archive carries the existing image embeddings, E5 embeddings produced from product text plus caption text, caption cache, and evaluation state, so it does not require a new full rebuild. It does not contain the Hugging Face model cache or source MySQL/S3 data. Keep `.env` separate and transfer its credentials securely.
+
 ## Development verification
 
 ```bash

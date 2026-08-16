@@ -8,7 +8,7 @@ services:
     ports:
       - "127.0.0.1:7700:7700"
     volumes:
-      - meili_data:/meili_data
+      - ./data/meilisearch:/meili_data
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:7700/health"]
       interval: 5s
@@ -29,5 +29,4 @@ services:
       retries: 20
 
 volumes:
-  meili_data:
   redis_data:

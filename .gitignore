@@ -15,6 +15,7 @@ uv.lock.bak
 **/data/*.sqlite*
 data/evaluation/*
 !data/evaluation/.gitkeep
+data/meilisearch/
 *.tsbuildinfo
 meili_data/
 redis_data/
