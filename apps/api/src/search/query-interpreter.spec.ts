@@ -21,4 +21,35 @@ describe("interpretQuery", () => {
     expect(result.derivedFilters.color).toEqual(["Grey"]);
     expect(result.derivedFilters.effect).toBeUndefined();
   });
+  it("uses the live vocabulary for colors and ORs material/effect families", () => {
+    const result = interpretQuery("red stones for a modern room", {
+      color: ["Red", "Blue"],
+      material: ["Sintered Stone", "Flexistone", "Porcelain Tile"],
+      effect: ["Stone", "Wood"],
+      surface: [], origin: [],
+    });
+    expect(result.derivedFilterGroups).toEqual([
+      { canonical: "Red", fields: { color: ["Red"] } },
+      { canonical: "Stone", fields: { material: ["Sintered Stone", "Flexistone"], effect: ["Stone"] } },
+    ]);
+  });
+  it("prefers a longer exact catalog value over an overlapping broad family", () => {
+    const result = interpretQuery("sintered stone", {
+      material: ["Sintered Stone", "Flexistone"], effect: ["Stone"],
+    });
+    expect(result.derivedFilterGroups).toEqual([
+      { canonical: "Sintered Stone", fields: { material: ["Sintered Stone"] } },
+    ]);
+  });
+  it("uses the first color as the structured base color while retaining secondary visual colors in text", () => {
+    const result = interpretQuery("dark blue marble with white veins", {
+      color: ["Blue", "White"], material: ["Sintered Stone"], effect: ["Marble"],
+    });
+    expect(result.derivedFilters.color).toEqual(["Blue"]);
+    expect(result.lexicalQuery).toContain("White veins");
+  });
+  it("supports an explicit OR between values of the same facet", () => {
+    const result = interpretQuery("red or blue tile", { color: ["Red", "Blue"] });
+    expect(result.derivedFilters.color).toEqual(["Red", "Blue"]);
+  });
 });

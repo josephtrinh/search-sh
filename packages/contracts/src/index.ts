@@ -45,7 +45,7 @@ export const SearchRequestSchema = z
     query: z.string().trim().max(500).optional(),
     mode: RankingModeSchema.default("auto"),
     filters: FiltersSchema.default({}),
-    sort: z.enum(["relevance", "price_asc", "price_desc"]).default("relevance"),
+    sort: z.literal("relevance").default("relevance"),
     limit: z.coerce.number().int().min(1).max(48).default(24),
     cursor: z.string().max(8192).optional(),
     hasImage: z.boolean().default(false),
@@ -112,6 +112,7 @@ export interface GroupCard {
   series: string;
   representative: ProductDocument;
   matchSources: string[];
+  primaryMatchSource: "keyword" | "semantic" | "visual_text" | "image";
 }
 
 export interface FacetResult {

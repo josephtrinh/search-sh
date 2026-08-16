@@ -11,14 +11,27 @@ describe("SearchService", () => {
   });
   it("builds the approved text-only auto weights", () => {
     const branches = (service as any).buildBranches("auto", "grey tile", { semantic: [1], visualText: [2] }, undefined, defaultRankingConfig, true);
-    expect(branches.map((branch: any) => [branch.source, branch.query.federationOptions.weight])).toEqual([
-      ["keyword", .4], ["e5_text", .4], ["siglip_image", .2],
+    expect(branches.map((branch: any) => [branch.source, branch.weight])).toEqual([
+      ["keyword", .4], ["semantic", .4], ["visual_text", .2],
     ]);
   });
   it("builds the approved combined auto weights", () => {
     const branches = (service as any).buildBranches("auto", "grey tile", { semantic: [1], visualText: [2], image: [3] }, undefined, defaultRankingConfig, true);
-    expect(branches.map((branch: any) => [branch.source, branch.query.federationOptions.weight])).toEqual([
-      ["keyword", .15], ["e5_text", .25], ["siglip_image", .1], ["siglip_image", .5],
+    expect(branches.map((branch: any) => [branch.source, branch.weight])).toEqual([
+      ["keyword", .15], ["semantic", .25], ["visual_text", .1], ["image", .5],
     ]);
+  });
+  it("combines derived attribute families with OR and independent concepts with AND", () => {
+    const expression = (service as any).derivedFilterExpression({}, [
+      { canonical: "Red", fields: { color: ["Red"] } },
+      { canonical: "Stone", fields: { material: ["Sintered Stone", "Flexistone"], effect: ["Stone"] } },
+    ]);
+    expect(expression).toBe('color IN ["Red"] AND (material IN ["Sintered Stone","Flexistone"] OR effect IN ["Stone"])');
+  });
+  it("lets explicit filters override the same derived field", () => {
+    const expression = (service as any).derivedFilterExpression({ color: ["Blue"] }, [
+      { canonical: "Red", fields: { color: ["Red"] } },
+    ]);
+    expect(expression).toBeUndefined();
   });
 });

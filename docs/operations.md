@@ -31,7 +31,7 @@ pnpm --filter @samplehub/indexer preflight
 pnpm --filter @samplehub/indexer smoke:search
 ```
 
-Preflight verifies source count/mapping, one S3 read, and service health. Search smoke loads E5 and SigLIP if necessary and verifies the v2 user-provided embedders, semantic search, weighted federation, and global distinct. Florence loads when the first uncached caption is requested.
+Preflight verifies source count/mapping, one S3 read, and service health. Search smoke loads E5 and SigLIP if necessary and verifies both v2 user-provided embedders, the retrieval branches, and global distinct; API unit tests cover reciprocal-rank fusion. Florence loads when the first uncached caption is requested.
 
 The three pinned models require several gigabytes of local Hugging Face cache and additional working memory. Providers load lazily but remain resident. Use `SIGLIP_BACKEND`, `TEXT_EMBEDDING_BACKEND`, or `CAPTION_BACKEND=cpu` if a provider has MPS compatibility or memory trouble. Reducing `MAX_CAPTION_BATCH` bounds caption latency and memory; it does not change results.
 
@@ -66,12 +66,12 @@ Confirm the stable document count matches the eligible source count and the infe
 
 ## Ranking and aliases
 
-Admin sliders store relative v2 weights. Defaults are:
+Admin sliders store relative reciprocal-rank weights. Defaults are:
 
 - text-only: keyword `0.40`, E5 `0.40`, SigLIP text-to-image `0.20`
 - combined: image `0.50`, E5 `0.25`, keyword `0.15`, SigLIP text-to-image `0.10`
 
-At least one weight in each group must be positive. Alias-derived filters apply only to auto mode. Explicit request filters always win over a conflicting alias.
+At least one weight in each group must be positive. Auto mode resolves exact values from the live facet vocabulary, supplements them with curated synonyms, and supports OR families across material/effect fields. Preferred matches occupy roughly six of every seven result positions; the remaining lane is an unfiltered fallback. Explicit request filters always win over a conflicting derived field.
 
 ## Backups and reset
 

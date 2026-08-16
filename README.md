@@ -61,6 +61,8 @@ pnpm --filter @samplehub/web dev
 
 Open `http://127.0.0.1:3000` for search and `http://127.0.0.1:3000/admin` for indexing and ranking. Local development intentionally has no authentication; do not expose it to an untrusted network.
 
+Auto text search extracts populated catalog attributes from the live facet vocabulary, applies cross-field material/effect families as preferred constraints, and combines keyword, E5, and SigLIP results with weighted reciprocal-rank fusion. Empty facets are hidden automatically.
+
 ## Image and caption policy
 
 `IMAGE_EMBEDDING_MODE=thumbnail` embeds the original image selected by `products.thumbnail_id`, falling back to the first ordered original image. `all` embeds every product image in batches of eight.

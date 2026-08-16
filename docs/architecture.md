@@ -49,11 +49,13 @@ No new `siglip_text` product vector is generated. SigLIP text encoding remains u
 | `text_hybrid` | separate keyword and E5 branches |
 | `text_visual` | SigLIP text against `siglip_image` |
 | `image_visual` | SigLIP image against `siglip_image` |
-| `auto` | modality-aware weighted federation plus conservative aliases |
+| `auto` | catalog-aware preferred candidates plus weighted reciprocal-rank fusion |
 
-Default auto weights are keyword/E5/SigLIP-text-to-image `0.40/0.40/0.20` for text-only queries and keyword/E5/SigLIP-text-to-image/SigLIP-image `0.15/0.25/0.10/0.50` for combined queries. Values are relative, stored as ranking v2 settings in SQLite, and editable in `/admin`.
+Default auto weights are keyword/E5/SigLIP-text-to-image `0.40/0.40/0.20` for text-only queries and keyword/E5/SigLIP-text-to-image/SigLIP-image `0.15/0.25/0.10/0.50` for combined queries. Values are relative reciprocal-rank weights, stored as ranking v2 settings in SQLite, and editable in `/admin`; raw scores from different models are never compared directly.
 
-Auto mode recognizes conservative English, Traditional Chinese, and Simplified Chinese aliases for canonical origin, color, effect, porcelain, and non-slip values. Explicit filters override derived ones. Derived constraints use 85% filtered branches plus 15% unfiltered fallbacks; explicit filters remain mandatory everywhere. Specialist modes do not apply aliases, keeping them useful as evaluation baselines.
+Auto mode caches the live color, material, effect, surface, and origin facet vocabulary and combines exact catalog phrases with curated English, Traditional Chinese, and Simplified Chinese synonyms. Attribute families can span fields: for example, stone intent becomes an OR across matching material and effect values, while independent concepts such as color and stone remain AND constraints. The first mentioned color is treated as the structured base color; secondary colors remain in the semantic/visual query unless the user explicitly joins colors with `and` or `or`.
+
+Explicit filters override derived fields. Preferred candidates are fused separately and interleaved with unfiltered fallback candidates at approximately 85/15 (six preferred results per fallback), while explicit filters remain mandatory everywhere. Each result reports its actual contributing branches and primary match source. Specialist modes bypass catalog interpretation, keeping them useful as evaluation baselines. Facets without values are omitted by the web UI; relevance is the only supported sort while the source has no prices.
 
 The API checks active index embedders on a short cache. Before the v2 swap it encodes legacy semantic queries with SigLIP and searches `siglip_text`; after the swap it automatically uses E5. This keeps stable search available during migration.
 
