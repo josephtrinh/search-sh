@@ -2,6 +2,8 @@
 
 The indexer connects directly to the existing SampleHub MySQL and S3 sources using read-only credentials. This file records the integration boundary; it is not a proposal to modify SampleHub.
 
+Florence captions, caption provenance, E5 passages, and all vectors are search-owned derived data. They are stored only in local SQLite and Meilisearch. They never update `products.description` or any other SampleHub field.
+
 ## Selection
 
 - Table: `products` (`p`)
@@ -27,3 +29,5 @@ The `attributes` object includes public technical and packaging specifications: 
 - S3 credentials or private object metadata
 
 The UI-visible price is `products.rrp`. Image URLs use the configured public bucket base; binary reads for embedding use the read-only S3 API.
+
+`products.thumbnail_id` selects the representative original image. If it is absent or invalid, the first original ordered by `products.image_ids` is used. SigLIP may embed all originals when configured, but Florence captions only this representative image.

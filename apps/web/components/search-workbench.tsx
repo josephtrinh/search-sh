@@ -4,7 +4,7 @@ import { useRef, useState, useTransition } from "react";
 import { facetKeys, type FacetKey, type SearchResponse } from "@samplehub/contracts";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000/v1";
-const LABELS: Record<FacetKey, string> = { category: "Category", material: "Material", color: "Colour", brand: "Brand", series: "Series", model: "Model", surface: "Surface", edge: "Edge", sizeGroup: "Size group", waterAbsorption: "Water absorption", fireResistance: "Fire resistance", price: "Price", availability: "Availability" };
+const LABELS: Record<FacetKey, string> = { category: "Category", material: "Material", color: "Colour", origin: "Origin", effect: "Effect", brand: "Brand", series: "Series", model: "Model", surface: "Surface", edge: "Edge", sizeGroup: "Size group", waterAbsorption: "Water absorption", fireResistance: "Fire resistance", price: "Price", availability: "Availability" };
 
 export function SearchWorkbench() {
   const [query, setQuery] = useState(""); const [image, setImage] = useState<File | null>(null); const [preview, setPreview] = useState<string | null>(null);

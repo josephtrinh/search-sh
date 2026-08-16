@@ -16,6 +16,8 @@ export const facetKeys = [
   "category",
   "material",
   "color",
+  "origin",
+  "effect",
   "brand",
   "series",
   "model",
@@ -149,23 +151,32 @@ export interface IndexRunSummary {
   totalProducts: number;
   embeddedImages: number;
   failedImages: number;
+  captionedImages: number;
+  cachedCaptions: number;
+  failedCaptions: number;
   startedAt: string | null;
   finishedAt: string | null;
   error: string | null;
 }
 
 export interface RankingConfig {
-  semanticRatio: number;
-  textHybridWeight: number;
+  version: 2;
+  textKeywordWeight: number;
+  textSemanticWeight: number;
   textVisualWeight: number;
-  combinedTextWeight: number;
+  combinedKeywordWeight: number;
+  combinedSemanticWeight: number;
+  combinedVisualTextWeight: number;
   combinedImageWeight: number;
 }
 
 export const defaultRankingConfig: RankingConfig = {
-  semanticRatio: 0.5,
-  textHybridWeight: 0.5,
-  textVisualWeight: 0.5,
-  combinedTextWeight: 0.5,
+  version: 2,
+  textKeywordWeight: 0.4,
+  textSemanticWeight: 0.4,
+  textVisualWeight: 0.2,
+  combinedKeywordWeight: 0.15,
+  combinedSemanticWeight: 0.25,
+  combinedVisualTextWeight: 0.1,
   combinedImageWeight: 0.5,
 };

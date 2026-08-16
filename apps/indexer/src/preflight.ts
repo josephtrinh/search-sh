@@ -11,6 +11,7 @@ async function main() {
       fetch(`${config.MEILI_URL}/health`),
       fetch(`${config.INFERENCE_URL}/health`),
     ]);
+    const inferenceHealth = inference.ok ? await inference.json() as { models?: Record<string, { model_id?: string; configured_revision?: string }> } : null;
     const sample = await catalog.batch(null, 1);
     if (!sample[0]) throw new Error("No eligible SampleHub guest-library products were found");
     let s3Readable = false;
@@ -19,7 +20,8 @@ async function main() {
       s3Readable = bytes.length > 0;
     }
     console.log(JSON.stringify({ eligibleProducts: count, sampleProductMapped: Boolean(sample[0].id && sample[0].groupId),
-      sampleImageCount: sample[0].images.length, s3Readable, meilisearchHealthy: meili.ok, inferenceHealthy: inference.ok }, null, 2));
+      sampleImageCount: sample[0].images.length, s3Readable, meilisearchHealthy: meili.ok, inferenceHealthy: inference.ok,
+      inferenceModels: inferenceHealth?.models ?? null }, null, 2));
   } finally {
     await catalog.close();
   }

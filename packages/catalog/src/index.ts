@@ -8,7 +8,7 @@ export function createGroupId(series: string, brand: string): string {
   return createHash("sha256").update(key).digest("hex").slice(0, 32);
 }
 
-export function buildEmbeddingText(product: ProductDocument): string {
+export function buildEmbeddingText(product: ProductDocument, visualCaption?: string | null): string {
   const fields: Array<[string, unknown]> = [
     ["Brand", product.brand],
     ["Series", product.series],
@@ -27,6 +27,7 @@ export function buildEmbeddingText(product: ProductDocument): string {
     ["Size", product.sizeGroup],
     ["Water absorption", product.waterAbsorption],
     ["Fire resistance", product.fireResistance],
+    ["Visual description", visualCaption],
     ["Description", product.description],
     ["Detail", product.detail],
     ["Remarks", product.remarks],

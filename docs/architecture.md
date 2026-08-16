@@ -1,67 +1,68 @@
 # Architecture
 
-## Boundaries
+## Boundaries and data flow
 
-The system reads the SampleHub MySQL catalog and S3 images with read-only credentials. It owns only Meilisearch documents, Redis jobs, a local SQLite control database, and local evaluation fixtures. It never mutates the SampleHub schema, rows, or objects.
+The system reads SampleHub MySQL and S3 with read-only credentials. It owns only Meilisearch documents, Redis jobs, a local SQLite control/caption database, and evaluation fixtures. It never updates SampleHub rows, descriptions, or objects.
 
 ```text
 SampleHub MySQL ─┐
-                 ├─> BullMQ indexer ─> SigLIP inference ─> Meilisearch
-SampleHub S3 ────┘          ↑                                  ↑
-                            │                                  │
-                       Redis queue                       NestJS API
-                                                               ↑
-                                                    Next.js web/admin
-                            SQLite <──── run state/evaluation ──┘
+                 ├─> BullMQ indexer ─┬─> multilingual E5 passages ─┐
+SampleHub S3 ────┘                   ├─> SigLIP 2 images ──────────┼─> Meilisearch
+                                    └─> Florence 2 captions ──────┘
+                                               │                         ↑
+                                               └─> SQLite cache          │
+                                                                          │
+Next.js web/admin ─> NestJS API ─> E5 query + SigLIP text/image ──────────┘
+                         │
+                         └─> SQLite run state, ranking, evaluation
 ```
 
-## Catalog contract
+All three providers are lazy-loaded behind one priority scheduler. Interactive query work has priority over indexing work at task boundaries. Model-specific device settings may select MPS or CPU.
 
-Eligible products satisfy all three source predicates:
+## Catalog and generated data
+
+Eligible products satisfy:
 
 ```sql
 deleted_at IS NULL AND COALESCE(is_private, 0) = 0 AND type = 'plan_product'
 ```
 
-One source product becomes one search document. A stable `groupId` is the first 32 hex characters of SHA-256 over the JSON tuple of normalized `[series, brand]`; normalization trims and lowercases using the English locale. Search results are distinct by `groupId`, while facet counts remain product-level. Group detail fetches all exact documents and subdivides them by model.
+One source product becomes one search document. `groupId` is the first 32 hex characters of SHA-256 over normalized `[series, brand]`. Results are distinct by group while facets remain product-level.
 
-Only public merchandising/specification fields are indexed. Internal notes, unit rate, discount, supplier/organization/author identifiers, and access-control fields are excluded. See [source mapping](samplehub-api.md).
+Florence captions only the thumbnail-designated original image, falling back to the first ordered original. The caption is stored in the local cache with its image SHA-256, model ID/revision, task, and timestamps. `generatedVisualCaption` is searchable in Meilisearch but excluded from displayed attributes and public product contracts.
+
+The E5 passage contains labeled public fields followed by the generated visual description and remaining source details. The inference service applies the required `passage:` prefix; query requests receive `query:`. Inputs are truncated to 512 tokens, average-pooled, and normalized.
 
 ## Vectors and retrieval
 
-The inference service exposes independent normalized text and image embeddings from pinned SigLIP 2. Each document stores:
+Each v2 document stores:
 
-- `siglip_text`: one vector generated from labeled public product fields
-- `siglip_image`: vectors selected by `IMAGE_EMBEDDING_MODE`; `thumbnail` uses the original asset designated by `thumbnail_id` and falls back to the first ordered original, while `all` embeds every image in batches of eight
+- `e5_text`: one 768-dimensional multilingual product-passage vector
+- `siglip_image`: representative or all-image 768-dimensional vectors according to `IMAGE_EMBEDDING_MODE`
 
-SigLIP 2 text inputs are truncated to the model-declared context length (64 positions for the pinned model). Identity and primary discovery fields are placed first in the embedding template so they survive truncation; full untruncated fields remain available to Meilisearch keyword retrieval.
-
-The API constructs Meilisearch branches according to the requested mode:
+No new `siglip_text` product vector is generated. SigLIP text encoding remains useful for searching the visual vector space.
 
 | Mode | Retrieval |
 | --- | --- |
-| `keyword` | lexical query only |
-| `text_semantic` | text vector, semantic ratio 1 |
-| `text_hybrid` | lexical + text vector |
-| `text_visual` | text vector searched against image vectors |
-| `image_visual` | uploaded image vector against image vectors |
-| `auto` | weighted federation of applicable text and image branches |
+| `keyword` | raw lexical baseline |
+| `text_semantic` | E5 query against `e5_text` |
+| `text_hybrid` | separate keyword and E5 branches |
+| `text_visual` | SigLIP text against `siglip_image` |
+| `image_visual` | SigLIP image against `siglip_image` |
+| `auto` | modality-aware weighted federation plus conservative aliases |
 
-Text and image embeddings are requested concurrently when both are supplied. Meilisearch weighted federation applies one global `groupId` distinct rule. Ranking settings are held in SQLite and editable through the admin UI. Cursor pagination is an opaque encoded offset; it is not snapshot-isolated.
+Default auto weights are keyword/E5/SigLIP-text-to-image `0.40/0.40/0.20` for text-only queries and keyword/E5/SigLIP-text-to-image/SigLIP-image `0.15/0.25/0.10/0.50` for combined queries. Values are relative, stored as ranking v2 settings in SQLite, and editable in `/admin`.
+
+Auto mode recognizes conservative English, Traditional Chinese, and Simplified Chinese aliases for canonical origin, color, effect, porcelain, and non-slip values. Explicit filters override derived ones. Derived constraints use 85% filtered branches plus 15% unfiltered fallbacks; explicit filters remain mandatory everywhere. Specialist modes do not apply aliases, keeping them useful as evaluation baselines.
+
+The API checks active index embedders on a short cache. Before the v2 swap it encodes legacy semantic queries with SigLIP and searches `siglip_text`; after the swap it automatically uses E5. This keeps stable search available during migration.
 
 ## Index lifecycle
 
-A full build writes to a run-specific shadow index. It must satisfy:
+A full build writes to a run-specific v2 shadow index. Caption cache hits are reused; missing captions are generated in small batches. Input-specific HTTP 422 responses recursively split image and caption batches so one invalid asset cannot discard valid neighbors. A caption or caption-model failure is recorded but the product continues with structured E5 text. S3 and SigLIP failures remain part of the existing image-success gate.
 
-1. every eligible product was processed;
-2. shadow document count equals the source count;
-3. at least 95% of referenced images embedded successfully;
-4. a search smoke query succeeds.
-
-Only then is the shadow index atomically swapped with the stable index. The old index is smoke-tested through the stable name and then deleted. Product and file watermarks are set to the full-build start time so changes made during the rebuild are captured by the next incremental run.
-
-Incremental indexing merges the product and file change streams, rehydrates changed eligible products, removes documents that became ineligible/deleted, and advances both watermarks only after successful completion.
+Only a complete, count-matched, image-gated, smoke-tested shadow index swaps into the stable name. Watermarks use the full-build start time so source changes during a long rebuild are captured by the next incremental. Incremental indexing refuses legacy vector settings and otherwise rehydrates changed products, invalidates captions by content hash/model/task, deletes newly ineligible products, and advances watermarks after success.
 
 ## Local control data
 
-SQLite stores schema migrations, index runs and image failures, stream watermarks, ranking settings, evaluation queries, relevance judgments, and evaluation reports. Evaluation images live under `data/evaluation`; shopper uploads remain in memory and are discarded after the request.
+SQLite stores migrations, index runs and failures, caption cache entries, stream watermarks, ranking v2 settings, evaluation queries, judgments, and reports. Legacy ranking JSON is left intact under its original key. Evaluation images live under `data/evaluation`; shopper uploads remain in memory and are discarded after each request.

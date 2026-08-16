@@ -1,13 +1,15 @@
 import { BadRequestException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
-import { facetKeys, FiltersSchema, SearchRequestSchema, type FacetKey, type GroupDetail, type ProductDocument, type RankingConfig, type SearchResponse } from "@samplehub/contracts";
+import { facetKeys, FiltersSchema, SearchRequestSchema, type FacetKey, type GroupDetail, type ProductDocument, type RankingConfig, type SearchFilters, type SearchResponse } from "@samplehub/contracts";
 import { getConfig } from "../common/config";
 import { StateService } from "../state/state.service";
+import { interpretQuery } from "./query-interpreter";
 
-type MeiliHit = ProductDocument & { _rankingScore?: number };
+type MeiliHit = ProductDocument & { _rankingScore?: number; _federation?: unknown };
 interface MeiliResult { hits: MeiliHit[]; estimatedTotalHits?: number; processingTimeMs?: number; facetDistribution?: Record<string, Record<string, number>>; }
+interface SearchBranch { source: string; query: Record<string, unknown>; }
 
 const FACET_FIELD: Record<FacetKey, string> = {
-  category: "category", material: "material", color: "color", brand: "brand", series: "series",
+  category: "category", material: "material", color: "color", origin: "origin", effect: "effect", brand: "brand", series: "series",
   model: "model", surface: "surface", edge: "edge", sizeGroup: "sizeGroup", waterAbsorption: "waterAbsorption",
   fireResistance: "fireResistance", price: "price", availability: "availability",
 };
@@ -15,6 +17,7 @@ const FACET_FIELD: Record<FacetKey, string> = {
 @Injectable()
 export class SearchService {
   private readonly config = getConfig();
+  private schemaCache: { v2: boolean; expiresAt: number } | null = null;
   constructor(private readonly state: StateService) {}
 
   private async meili(path: string, body?: unknown): Promise<any> {
@@ -28,11 +31,24 @@ export class SearchService {
     return response.json();
   }
 
-  private async embed(kind: "text" | "images", values: string[]): Promise<{ vectors: number[][]; milliseconds: number }> {
+  private async isV2Index(): Promise<boolean> {
+    if (this.schemaCache && this.schemaCache.expiresAt > Date.now()) return this.schemaCache.v2;
+    try {
+      const settings = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/settings`);
+      const v2 = Boolean(settings.embedders?.e5_text);
+      this.schemaCache = { v2, expiresAt: Date.now() + 5000 };
+      return v2;
+    } catch (error) {
+      if (error instanceof NotFoundException) return false;
+      throw error;
+    }
+  }
+
+  private async embed(path: "text" | "visual-text" | "images", values: string[]): Promise<{ vectors: number[][]; milliseconds: number }> {
     const started = performance.now();
-    const response = await fetch(`${this.config.INFERENCE_URL}/v1/embed/${kind}`, {
+    const response = await fetch(`${this.config.INFERENCE_URL}/v1/embed/${path}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(kind === "text" ? { texts: values, priority: 0 } : { images: values, priority: 0 }),
+      body: JSON.stringify(path === "images" ? { images: values, priority: 0 } : { texts: values, ...(path === "text" ? { inputType: "query" } : {}), priority: 0 }),
     });
     if (!response.ok) throw new BadRequestException(`Inference rejected the query: ${(await response.text()).slice(0, 300)}`);
     const payload = await response.json() as { embeddings: number[][] };
@@ -48,45 +64,83 @@ export class SearchService {
     return clauses.length ? clauses.join(" AND ") : undefined;
   }
 
-  private branch(query: string, vector: number[] | undefined, embedder: string | undefined, ratio: number, filter?: string, weight = 1) {
-    return {
+  private derivedFilters(explicit: SearchFilters, derived: Partial<SearchFilters>): SearchFilters {
+    const merged: SearchFilters = { ...explicit };
+    for (const [key, values] of Object.entries(derived) as Array<[FacetKey, string[] | undefined]>) {
+      if (!explicit[key]?.length && values?.length) merged[key] = values;
+    }
+    return merged;
+  }
+
+  private branch(source: string, query: string, vector: number[] | undefined, embedder: string | undefined, filter?: string, weight = 1): SearchBranch {
+    return { source, query: {
       indexUid: this.config.MEILI_INDEX_UID,
       q: query,
       ...(vector ? { vector } : {}),
-      ...(embedder ? { hybrid: { embedder, semanticRatio: ratio } } : {}),
+      ...(embedder ? { hybrid: { embedder, semanticRatio: 1 } } : {}),
       ...(filter ? { filter } : {}),
       showRankingScore: true,
       federationOptions: { weight },
-    };
+    } };
   }
 
   async search(input: Record<string, unknown>, image?: Express.Multer.File): Promise<SearchResponse> {
     const request = SearchRequestSchema.parse({ ...input, filters: typeof input.filters === "string" ? JSON.parse(input.filters) : input.filters, hasImage: Boolean(image) });
     const started = performance.now();
-    const filter = this.filterExpression(request.filters);
+    const explicitFilters = FiltersSchema.parse(request.filters);
+    const v2 = await this.isV2Index();
+    if (!v2 && (explicitFilters.origin?.length || explicitFilters.effect?.length)) {
+      throw new BadRequestException("Origin and effect filters require a completed v2 full rebuild");
+    }
+    const explicitFilter = this.filterExpression(explicitFilters);
     const ranking = this.state.getRanking();
     const query = request.query ?? "";
-    const [textEmbedding, imageEmbedding] = await Promise.all([
-      query && request.mode !== "keyword" ? this.embed("text", [query]) : Promise.resolve(undefined),
+    const needsSemantic = Boolean(query) && ["auto", "text_semantic", "text_hybrid"].includes(request.mode);
+    const needsVisualText = Boolean(query) && (["auto", "text_visual"].includes(request.mode) || (!v2 && needsSemantic));
+    const [semanticEmbedding, visualTextEmbedding, imageEmbedding] = await Promise.all([
+      needsSemantic && v2 ? this.embed("text", [query]) : Promise.resolve(undefined),
+      needsVisualText ? this.embed("visual-text", [query]) : Promise.resolve(undefined),
       image ? this.embed("images", [image.buffer.toString("base64")]) : Promise.resolve(undefined),
     ]);
-    const branches = this.buildBranches(request.mode, query, textEmbedding?.vectors[0], imageEmbedding?.vectors[0], filter, ranking);
+    const interpretation = request.mode === "auto" ? interpretQuery(query) : { lexicalQuery: query, derivedFilters: {} };
+    if (!v2) {
+      delete interpretation.derivedFilters.origin;
+      delete interpretation.derivedFilters.effect;
+    }
+    const mergedFilters = this.derivedFilters(explicitFilters, interpretation.derivedFilters);
+    const hasDerived = JSON.stringify(mergedFilters) !== JSON.stringify(explicitFilters);
+    const preferredFilter = hasDerived ? this.filterExpression(mergedFilters) : explicitFilter;
+    const vectors = {
+      semantic: semanticEmbedding?.vectors[0] ?? (!v2 ? visualTextEmbedding?.vectors[0] : undefined),
+      visualText: visualTextEmbedding?.vectors[0],
+      image: imageEmbedding?.vectors[0],
+    };
+    let branches = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, preferredFilter, ranking, v2);
+    if (hasDerived) {
+      const preferred = branches.map((branch) => ({ ...branch, query: { ...branch.query, federationOptions: { weight: Number((branch.query.federationOptions as { weight: number }).weight) * 0.85 } } }));
+      const fallback = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, explicitFilter, ranking, v2)
+        .map((branch) => ({ ...branch, source: `${branch.source}_fallback`, query: { ...branch.query, federationOptions: { weight: Number((branch.query.federationOptions as { weight: number }).weight) * 0.15 } } }));
+      branches = [...preferred, ...fallback];
+    }
     if (!branches.length) throw new BadRequestException("The selected mode is incompatible with the supplied query");
     const offset = this.decodeCursor(request.cursor);
+    const activeFacetKeys = v2 ? facetKeys : facetKeys.filter((key) => key !== "origin" && key !== "effect");
     let result: MeiliResult;
     if (branches.length === 1) {
-      result = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/search`, { ...branches[0], indexUid: undefined, federationOptions: undefined,
-        distinct: "groupId", facets: facetKeys.map((key) => FACET_FIELD[key]), limit: request.limit, offset });
+      const { indexUid: _, federationOptions: __, ...single } = branches[0]!.query;
+      result = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/search`, { ...single,
+        distinct: "groupId", facets: activeFacetKeys.map((key) => FACET_FIELD[key]), limit: request.limit, offset });
     } else {
       const payload = await this.meili("/multi-search", {
         federation: { limit: request.limit, offset, distinct: "groupId" },
-        queries: branches,
+        queries: branches.map((branch) => branch.query),
       });
       result = payload as MeiliResult;
     }
-    const facetResult = await this.loadFacets(branches[0]!, filter);
+    const facetResult = await this.loadFacets(branches[0]!.query, activeFacetKeys);
+    const sources = [...new Set(branches.map((branch) => branch.source.replace(/_fallback$/, "")))];
     const hits = result.hits.map((hit) => ({ groupId: hit.groupId, brand: hit.brand, series: hit.series,
-      representative: this.cleanHit(hit), matchSources: branches.map((branch) => String(branch.hybrid?.embedder ?? "keyword")) }));
+      representative: this.cleanHit(hit), matchSources: sources }));
     return {
       hits,
       facets: facetKeys.map((key) => {
@@ -96,29 +150,38 @@ export class SearchService {
       nextCursor: hits.length === request.limit ? this.encodeCursor(offset + hits.length) : null,
       estimatedProductHits: facetResult.estimatedTotalHits ?? result.estimatedTotalHits ?? hits.length,
       processingTimeMs: performance.now() - started,
-      timing: { inference: (textEmbedding?.milliseconds ?? 0) + (imageEmbedding?.milliseconds ?? 0), meilisearch: result.processingTimeMs ?? 0 },
+      timing: { inference: (semanticEmbedding?.milliseconds ?? 0) + (visualTextEmbedding?.milliseconds ?? 0) + (imageEmbedding?.milliseconds ?? 0), meilisearch: result.processingTimeMs ?? 0 },
     };
   }
 
-  private buildBranches(mode: string, query: string, text: number[] | undefined, image: number[] | undefined, filter: string | undefined, ranking: RankingConfig): any[] {
-    if (mode === "keyword") return query ? [this.branch(query, undefined, undefined, 0, filter)] : [];
-    if (mode === "text_semantic") return text ? [this.branch("", text, "siglip_text", 1, filter)] : [];
-    if (mode === "text_hybrid") return text ? [this.branch(query, text, "siglip_text", ranking.semanticRatio, filter)] : [];
-    if (mode === "text_visual") return text ? [this.branch("", text, "siglip_image", 1, filter)] : [];
-    if (mode === "image_visual") return image ? [this.branch("", image, "siglip_image", 1, filter)] : [];
-    const branches: any[] = [];
-    const textScale = image ? ranking.combinedTextWeight : 1;
-    if (text) {
-      branches.push(this.branch(query, text, "siglip_text", ranking.semanticRatio, filter, textScale * ranking.textHybridWeight));
-      branches.push(this.branch("", text, "siglip_image", 1, filter, textScale * ranking.textVisualWeight));
-    }
-    if (image) branches.push(this.branch("", image, "siglip_image", 1, filter, text ? ranking.combinedImageWeight : 1));
-    return branches;
+  private buildBranches(mode: string, query: string, vectors: { semantic?: number[]; visualText?: number[]; image?: number[] }, filter: string | undefined, ranking: RankingConfig, v2: boolean): SearchBranch[] {
+    const semanticEmbedder = v2 ? "e5_text" : "siglip_text";
+    if (mode === "keyword") return query ? [this.branch("keyword", query, undefined, undefined, filter)] : [];
+    if (mode === "text_semantic") return vectors.semantic ? [this.branch(semanticEmbedder, "", vectors.semantic, semanticEmbedder, filter)] : [];
+    if (mode === "text_hybrid") return [
+      ...(query ? [this.branch("keyword", query, undefined, undefined, filter, ranking.textKeywordWeight)] : []),
+      ...(vectors.semantic ? [this.branch(semanticEmbedder, "", vectors.semantic, semanticEmbedder, filter, ranking.textSemanticWeight)] : []),
+    ];
+    if (mode === "text_visual") return vectors.visualText ? [this.branch("siglip_image", "", vectors.visualText, "siglip_image", filter)] : [];
+    if (mode === "image_visual") return vectors.image ? [this.branch("siglip_image", "", vectors.image, "siglip_image", filter)] : [];
+    if (vectors.image && !query) return [this.branch("siglip_image", "", vectors.image, "siglip_image", filter)];
+    if (vectors.image && query) return [
+      this.branch("keyword", query, undefined, undefined, filter, ranking.combinedKeywordWeight),
+      ...(vectors.semantic ? [this.branch(semanticEmbedder, "", vectors.semantic, semanticEmbedder, filter, ranking.combinedSemanticWeight)] : []),
+      ...(vectors.visualText ? [this.branch("siglip_image", "", vectors.visualText, "siglip_image", filter, ranking.combinedVisualTextWeight)] : []),
+      this.branch("siglip_image", "", vectors.image, "siglip_image", filter, ranking.combinedImageWeight),
+    ];
+    return [
+      ...(query ? [this.branch("keyword", query, undefined, undefined, filter, ranking.textKeywordWeight)] : []),
+      ...(vectors.semantic ? [this.branch(semanticEmbedder, "", vectors.semantic, semanticEmbedder, filter, ranking.textSemanticWeight)] : []),
+      ...(vectors.visualText ? [this.branch("siglip_image", "", vectors.visualText, "siglip_image", filter, ranking.textVisualWeight)] : []),
+    ];
   }
 
-  private async loadFacets(base: any, filter?: string): Promise<MeiliResult> {
-    return this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/search`, { ...base, indexUid: undefined, federationOptions: undefined,
-      filter, distinct: undefined, facets: facetKeys.map((key) => FACET_FIELD[key]), limit: 0, offset: 0 });
+  private async loadFacets(base: Record<string, unknown>, activeFacetKeys: readonly FacetKey[]): Promise<MeiliResult> {
+    const { indexUid: _, federationOptions: __, ...query } = base;
+    return this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/search`, { ...query,
+      distinct: undefined, facets: activeFacetKeys.map((key) => FACET_FIELD[key]), limit: 0, offset: 0 });
   }
 
   async product(id: string): Promise<ProductDocument> {
@@ -156,7 +219,7 @@ export class SearchService {
   }
 
   private cleanHit(hit: MeiliHit): ProductDocument {
-    const { _rankingScore: _, ...document } = hit;
+    const { _rankingScore: _, _federation: __, ...document } = hit;
     return document;
   }
   private encodeCursor(offset: number): string { return Buffer.from(JSON.stringify({ v: 1, offset }), "utf8").toString("base64url"); }

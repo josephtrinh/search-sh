@@ -1,4 +1,4 @@
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -8,8 +8,14 @@ class Priority(IntEnum):
     indexing = 10
 
 
+class TextInputType(StrEnum):
+    query = "query"
+    passage = "passage"
+
+
 class TextEmbeddingRequest(BaseModel):
     texts: list[str] = Field(min_length=1, max_length=32)
+    inputType: TextInputType = TextInputType.query
     priority: Priority = Priority.interactive
 
     @model_validator(mode="after")
@@ -24,6 +30,11 @@ class ImageEmbeddingRequest(BaseModel):
     priority: Priority = Priority.interactive
 
 
+class CaptionRequest(BaseModel):
+    images: list[str] = Field(min_length=1, max_length=8, description="Base64-encoded images")
+    priority: Priority = Priority.indexing
+
+
 class EmbeddingResponse(BaseModel):
     embeddings: list[list[float]]
     dimensions: int
@@ -34,12 +45,26 @@ class EmbeddingResponse(BaseModel):
     inference_ms: float
 
 
-class HealthResponse(BaseModel):
-    status: str
+class CaptionResponse(BaseModel):
+    captions: list[str]
+    task: str
+    model_id: str
+    model_revision: str
+    device: str
+    queue_wait_ms: float
+    inference_ms: float
+
+
+class ModelHealth(BaseModel):
     loaded: bool
     model_id: str
     configured_revision: str
     resolved_revision: str | None
-    dimensions: int
-    device: str | None
+    device: str
+    dimensions: int | None = None
+
+
+class HealthResponse(BaseModel):
+    status: str
     queued: int
+    models: dict[str, ModelHealth]

@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
-from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
@@ -21,6 +20,21 @@ def text_context_length(model: Any) -> int:
     text_config = getattr(getattr(model, "config", None), "text_config", None)
     value = getattr(text_config, "max_position_embeddings", 64)
     return value if isinstance(value, int) and value > 0 else 64
+
+
+def resolve_device(torch: Any, backend: str | None, fallback: str) -> str:
+    selected = (backend or fallback).strip().lower()
+    if selected == "deterministic":
+        return "cpu"
+    if selected == "cpu":
+        return "cpu"
+    if selected not in {"auto", "mps"}:
+        raise RuntimeError(f"unsupported inference backend: {selected}")
+    if torch.backends.mps.is_available():
+        return "mps"
+    if selected == "mps":
+        raise RuntimeError("MPS was requested but is not available")
+    return "cpu"
 
 
 def decode_image(encoded: str, settings: Settings) -> Image.Image:
@@ -45,29 +59,23 @@ def decode_image(encoded: str, settings: Settings) -> Image.Image:
         raise ValueError("image cannot be decoded") from exc
 
 
-class EmbeddingProvider(ABC):
+class ProviderMetadata:
     model_id: str
     configured_revision: str
     resolved_revision: str | None = None
-    dimensions: int
-    device: str
+    dimensions: int | None = None
+    device: str = "unloaded"
     loaded: bool = False
 
-    @abstractmethod
-    def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
 
-    @abstractmethod
-    def embed_images(self, images: list[Image.Image]) -> list[list[float]]: ...
-
-
-class DeterministicProvider(EmbeddingProvider):
+class DeterministicEmbeddingProvider(ProviderMetadata):
     """Cheap normalized embeddings for tests and UI development."""
 
-    def __init__(self, settings: Settings):
-        self.model_id = "deterministic-test-provider"
+    def __init__(self, settings: Settings, namespace: str, dimensions: int):
+        self.model_id = f"deterministic-{namespace}-provider"
         self.configured_revision = "1"
         self.resolved_revision = "1"
-        self.dimensions = settings.embedding_dimensions
+        self.dimensions = dimensions
         self.device = "cpu"
         self.loaded = True
 
@@ -80,20 +88,33 @@ class DeterministicProvider(EmbeddingProvider):
         )
         return normalize_rows(vector)[0].tolist()
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return [self._vector(text.encode("utf-8")) for text in texts]
+    def embed_texts(self, texts: list[str], input_type: str | None = None) -> list[list[float]]:
+        prefix = f"{input_type}:" if input_type else ""
+        return [self._vector(f"{prefix}{text}".encode()) for text in texts]
 
     def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
         return [self._vector(image.tobytes()) for image in images]
 
 
-class SiglipProvider(EmbeddingProvider):
+class DeterministicCaptionProvider(ProviderMetadata):
+    def __init__(self, settings: Settings):
+        self.model_id = "deterministic-caption-provider"
+        self.configured_revision = "1"
+        self.resolved_revision = "1"
+        self.device = "cpu"
+        self.loaded = True
+        self.task = settings.caption_task
+
+    def caption_images(self, images: list[Image.Image]) -> list[str]:
+        return [f"Test image with dimensions {image.width} by {image.height}." for image in images]
+
+
+class SiglipProvider(ProviderMetadata):
     def __init__(self, settings: Settings):
         self.settings = settings
         self.model_id = settings.embedding_model_id
         self.configured_revision = settings.embedding_model_revision
         self.dimensions = settings.embedding_dimensions
-        self.device = "unloaded"
         self._torch: Any = None
         self._model: Any = None
         self._processor: Any = None
@@ -104,18 +125,15 @@ class SiglipProvider(EmbeddingProvider):
         import torch
         from transformers import AutoModel, AutoProcessor
 
-        if self.settings.inference_backend == "cpu":
-            device = "cpu"
-        elif torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
+        device = resolve_device(
+            torch, self.settings.siglip_backend, self.settings.inference_backend
+        )
         self._torch = torch
         self._processor = AutoProcessor.from_pretrained(
             self.model_id, revision=self.configured_revision
         )
         self._model = AutoModel.from_pretrained(
-            self.model_id, revision=self.configured_revision
+            self.model_id, revision=self.configured_revision, use_safetensors=True
         ).to(device).eval()
         self.device = device
         self.resolved_revision = getattr(self._model.config, "_commit_hash", None)
@@ -126,7 +144,8 @@ class SiglipProvider(EmbeddingProvider):
             )
         self.loaded = True
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(self, texts: list[str], input_type: str | None = None) -> list[list[float]]:
+        del input_type
         self._load()
         inputs = self._processor(
             text=texts,
@@ -149,7 +168,126 @@ class SiglipProvider(EmbeddingProvider):
         return embeddings.cpu().float().numpy().tolist()
 
 
-def create_provider(settings: Settings) -> EmbeddingProvider:
+class E5Provider(ProviderMetadata):
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.model_id = settings.text_embedding_model_id
+        self.configured_revision = settings.text_embedding_model_revision
+        self.dimensions = settings.text_embedding_dimensions
+        self._torch: Any = None
+        self._model: Any = None
+        self._tokenizer: Any = None
+
+    def _load(self) -> None:
+        if self.loaded:
+            return
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+
+        device = resolve_device(
+            torch, self.settings.text_embedding_backend, self.settings.inference_backend
+        )
+        self._torch = torch
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            self.model_id, revision=self.configured_revision
+        )
+        self._model = AutoModel.from_pretrained(
+            self.model_id, revision=self.configured_revision, use_safetensors=True
+        ).to(device).eval()
+        self.device = device
+        self.resolved_revision = getattr(self._model.config, "_commit_hash", None)
+        hidden_size = getattr(self._model.config, "hidden_size", None)
+        if hidden_size is not None and hidden_size != self.dimensions:
+            raise RuntimeError(
+                f"configured dimensions {self.dimensions} do not match model {hidden_size}"
+            )
+        self.loaded = True
+
+    def embed_texts(self, texts: list[str], input_type: str | None = None) -> list[list[float]]:
+        self._load()
+        kind = input_type or "query"
+        if kind not in {"query", "passage"}:
+            raise ValueError("input_type must be query or passage")
+        values = [f"{kind}: {text}" for text in texts]
+        inputs = self._tokenizer(
+            values, max_length=512, padding=True, truncation=True, return_tensors="pt"
+        ).to(self.device)
+        with self._torch.inference_mode():
+            outputs = self._model(**inputs)
+            mask = inputs["attention_mask"].unsqueeze(-1).bool()
+            hidden = outputs.last_hidden_state.masked_fill(~mask, 0.0)
+            embeddings = hidden.sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+            embeddings = self._torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        return embeddings.cpu().float().numpy().tolist()
+
+
+class FlorenceProvider(ProviderMetadata):
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.model_id = settings.caption_model_id
+        self.configured_revision = settings.caption_model_revision
+        self.task = settings.caption_task
+        self._torch: Any = None
+        self._model: Any = None
+        self._processor: Any = None
+
+    def _load(self) -> None:
+        if self.loaded:
+            return
+        import torch
+        from transformers import AutoModelForCausalLM, AutoProcessor
+
+        device = resolve_device(
+            torch, self.settings.caption_backend, self.settings.inference_backend
+        )
+        self._torch = torch
+        self._processor = AutoProcessor.from_pretrained(
+            self.model_id, revision=self.configured_revision, trust_remote_code=True
+        )
+        self._model = AutoModelForCausalLM.from_pretrained(
+            self.model_id,
+            revision=self.configured_revision,
+            trust_remote_code=True,
+            use_safetensors=True,
+            attn_implementation="eager",
+        ).to(device).eval()
+        self.device = device
+        self.resolved_revision = getattr(self._model.config, "_commit_hash", None)
+        self.loaded = True
+
+    def caption_images(self, images: list[Image.Image]) -> list[str]:
+        self._load()
+        prompts = [self.task] * len(images)
+        inputs = self._processor(text=prompts, images=images, return_tensors="pt", padding=True)
+        inputs = {key: value.to(self.device) for key, value in inputs.items()}
+        with self._torch.inference_mode():
+            generated = self._model.generate(
+                **inputs,
+                max_new_tokens=self.settings.caption_max_new_tokens,
+                num_beams=self.settings.caption_num_beams,
+                do_sample=False,
+                use_cache=False,
+            )
+        decoded = self._processor.batch_decode(generated, skip_special_tokens=False)
+        captions: list[str] = []
+        for text, image in zip(decoded, images, strict=True):
+            parsed = self._processor.post_process_generation(
+                text, task=self.task, image_size=(image.width, image.height)
+            )
+            caption = parsed.get(self.task, "") if isinstance(parsed, dict) else str(parsed)
+            captions.append(str(caption).strip())
+        return captions
+
+
+def create_providers(
+    settings: Settings,
+) -> tuple[ProviderMetadata, ProviderMetadata, ProviderMetadata]:
     if settings.inference_backend == "deterministic":
-        return DeterministicProvider(settings)
-    return SiglipProvider(settings)
+        return (
+            DeterministicEmbeddingProvider(settings, "siglip", settings.embedding_dimensions),
+            DeterministicEmbeddingProvider(
+                settings, "e5", settings.text_embedding_dimensions
+            ),
+            DeterministicCaptionProvider(settings),
+        )
+    return SiglipProvider(settings), E5Provider(settings), FlorenceProvider(settings)

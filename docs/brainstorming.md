@@ -1,4 +1,6 @@
-**Full setup guide: Meilisearch + SigLIP 2 Base on M2 Mac (16 GB) for testing/development**
+> Historical brainstorming only. The implemented system now uses SigLIP 2 for visual retrieval, multilingual E5 for text retrieval, and Florence 2 for cached captions. Follow the root `README.md`; do not use the standalone commands below as the current runbook.
+
+**Original setup exploration: Meilisearch + SigLIP 2 Base on M2 Mac (16 GB)**
 
 This guide sets up:
 - Meilisearch locally

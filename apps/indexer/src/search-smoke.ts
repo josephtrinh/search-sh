@@ -17,13 +17,15 @@ async function main() {
       waterAbsorption: null, fireResistance: null, description: "Quiet grey marble tile", detail: null, remarks: null, price: null,
       availability: null, width: 600, height: 10, length: 600, depth: null, area: null, updatedAt: new Date().toISOString(), thumbnailId: null, images: [], attributes: {},
     };
-    const vector = (await new InferenceClient().text([buildEmbeddingText(product)]))[0]!;
-    await meili.add(uid, [{ ...product, _vectors: { siglip_text: vector, siglip_image: [vector] } }]);
+    const inference = new InferenceClient();
+    const textVector = (await inference.textPassages([buildEmbeddingText(product)]))[0]!;
+    const visualVector = (await inference.visualText(["grey stone tile"]))[0]!;
+    await meili.add(uid, [{ ...product, _vectors: { e5_text: textVector, siglip_image: [visualVector] } }]);
     const response = await fetch(`${config.MEILI_URL}/multi-search`, {
       method: "POST", headers: { Authorization: `Bearer ${config.MEILI_MASTER_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({ federation: { limit: 10, offset: 0, distinct: "groupId" }, queries: [
-        { indexUid: uid, q: "grey stone", vector, hybrid: { embedder: "siglip_text", semanticRatio: .5 }, federationOptions: { weight: .5 } },
-        { indexUid: uid, q: "", vector, hybrid: { embedder: "siglip_image", semanticRatio: 1 }, federationOptions: { weight: .5 } },
+        { indexUid: uid, q: "grey stone", vector: textVector, hybrid: { embedder: "e5_text", semanticRatio: .5 }, federationOptions: { weight: .5 } },
+        { indexUid: uid, q: "", vector: visualVector, hybrid: { embedder: "siglip_image", semanticRatio: 1 }, federationOptions: { weight: .5 } },
       ] }),
     });
     if (!response.ok) throw new Error(`Federated search failed: ${await response.text()}`);

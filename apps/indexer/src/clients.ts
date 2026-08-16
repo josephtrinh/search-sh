@@ -1,12 +1,34 @@
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { config } from "./config";
 
+export class InferenceHttpError extends Error {
+  constructor(
+    readonly operation: string,
+    readonly status: number,
+    readonly responseBody: string,
+  ) {
+    super(`Inference ${operation} failed: ${responseBody}`);
+    this.name = "InferenceHttpError";
+  }
+}
+
+export function isInferenceInputError(error: unknown): boolean {
+  return error instanceof InferenceHttpError && error.status === 422;
+}
+
 export class InferenceClient {
-  async text(texts: string[]): Promise<number[][]> { return this.call("text", { texts, priority: 10 }); }
+  async textPassages(texts: string[]): Promise<number[][]> { return this.call("embed/text", { texts, inputType: "passage", priority: 10 }); }
+  async visualText(texts: string[]): Promise<number[][]> { return this.call("embed/visual-text", { texts, priority: 10 }); }
   async images(images: Buffer[]): Promise<number[][]> { return this.call("images", { images: images.map((image) => image.toString("base64")), priority: 10 }); }
+  async captions(images: Buffer[]): Promise<string[]> {
+    const response = await fetch(`${config.INFERENCE_URL}/v1/caption/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images: images.map((image) => image.toString("base64")), priority: 10 }) });
+    if (!response.ok) throw new InferenceHttpError("caption", response.status, (await response.text()).slice(0, 500));
+    return ((await response.json()) as { captions: string[] }).captions;
+  }
   private async call(path: string, body: unknown): Promise<number[][]> {
-    const response = await fetch(`${config.INFERENCE_URL}/v1/embed/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    if (!response.ok) throw new Error(`Inference ${path} failed: ${(await response.text()).slice(0, 500)}`);
+    const normalizedPath = path.includes("/") ? path : `embed/${path}`;
+    const response = await fetch(`${config.INFERENCE_URL}/v1/${normalizedPath}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!response.ok) throw new InferenceHttpError(path, response.status, (await response.text()).slice(0, 500));
     return ((await response.json()) as { embeddings: number[][] }).embeddings;
   }
 }
@@ -33,16 +55,17 @@ export class MeiliClient {
   async configure(uid: string) {
     const settings = {
       displayedAttributes: ["id","groupId","brand","normalizedBrand","series","normalizedSeries","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","price","availability","width","height","length","depth","area","updatedAt","thumbnailId","images","attributes"],
-      searchableAttributes: ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","attributes"],
-      filterableAttributes: ["groupId","category","material","color","brand","series","model","surface","edge","sizeGroup","waterAbsorption","fireResistance","price","availability"],
+      searchableAttributes: ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","generatedVisualCaption","description","detail","remarks","attributes"],
+      filterableAttributes: ["groupId","category","material","color","origin","effect","brand","series","model","surface","edge","sizeGroup","waterAbsorption","fireResistance","price","availability"],
       sortableAttributes: ["price"], pagination: { maxTotalHits: 10000 }, faceting: { maxValuesPerFacet: 100, sortFacetValuesBy: { "*": "count" } },
-      embedders: { siglip_text: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS }, siglip_image: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS } },
+      embedders: { e5_text: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS }, siglip_image: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS } },
     };
     await this.wait((await this.request("PATCH", `/indexes/${uid}/settings`, settings)).taskUid);
   }
   async add(uid: string, documents: unknown[]) { await this.wait((await this.request("POST", `/indexes/${uid}/documents?primaryKey=id`, documents)).taskUid); }
   async deleteDocuments(uid: string, ids: string[]) { if (ids.length) await this.wait((await this.request("POST", `/indexes/${uid}/documents/delete-batch`, ids)).taskUid); }
   async count(uid: string): Promise<number> { return Number((await this.request("GET", `/indexes/${uid}/stats`)).numberOfDocuments); }
+  async hasEmbedder(uid: string, name: string): Promise<boolean> { const settings = await this.request("GET", `/indexes/${uid}/settings`); return Boolean(settings.embedders?.[name]); }
   async swap(first: string, second: string) { await this.wait((await this.request("POST", "/swap-indexes", [{ indexes: [first, second] }])).taskUid); }
   async deleteIndex(uid: string) { if (await this.exists(uid)) await this.wait((await this.request("DELETE", `/indexes/${uid}`)).taskUid); }
   async smoke(uid: string) { await this.request("POST", `/indexes/${uid}/search`, { q: "stone", limit: 1, distinct: "groupId" }); }

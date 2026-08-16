@@ -10,7 +10,9 @@ import { getConfig, redisConnection, WORKSPACE_ROOT } from "../common/config";
 import { StateService } from "../state/state.service";
 import { SearchService } from "../search/search.service";
 
-const RankingSchema = z.object({ semanticRatio: z.number().min(0).max(1), textHybridWeight: z.number().min(0), textVisualWeight: z.number().min(0), combinedTextWeight: z.number().min(0), combinedImageWeight: z.number().min(0) });
+const RankingSchema = z.object({ version: z.literal(2), textKeywordWeight: z.number().min(0), textSemanticWeight: z.number().min(0), textVisualWeight: z.number().min(0), combinedKeywordWeight: z.number().min(0), combinedSemanticWeight: z.number().min(0), combinedVisualTextWeight: z.number().min(0), combinedImageWeight: z.number().min(0) })
+  .refine((value) => value.textKeywordWeight + value.textSemanticWeight + value.textVisualWeight > 0, "At least one text-only weight must be positive")
+  .refine((value) => value.combinedKeywordWeight + value.combinedSemanticWeight + value.combinedVisualTextWeight + value.combinedImageWeight > 0, "At least one combined weight must be positive");
 const EvalQuerySchema = z.object({ label: z.string().min(1).max(200), queryText: z.string().max(500).optional(), language: z.enum(["en", "zh", "mixed"]), modality: z.enum(["text", "image", "combined"]), filters: z.record(z.string(), z.array(z.string())).default({}) });
 
 @Controller("admin")
