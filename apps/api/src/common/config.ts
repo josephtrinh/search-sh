@@ -19,13 +19,21 @@ const ConfigSchema = z.object({
   MEILI_INDEX_UID: z.string().default("products"),
   INFERENCE_URL: z.string().url().default("http://127.0.0.1:8100"),
   STATE_DATABASE_PATH: z.string().default("./data/search-state.sqlite"),
+  DINOV2_MODEL_ID: z.string().default("facebook/dinov2-base"),
+  DINOV2_MODEL_REVISION: z.string().default("f9e44c814b77203eaa57a6bdbbd535f21ede1415"),
+  DINOV2_DIMENSIONS: z.coerce.number().int().positive().default(768),
+  IMAGE_EMBEDDING_MODE: z.enum(["thumbnail", "all"]).default("thumbnail"),
 });
-export type AppConfig = z.infer<typeof ConfigSchema>;
+export type AppConfig = z.infer<typeof ConfigSchema> & { DINOV2_FINGERPRINT: string };
 let cached: AppConfig | undefined;
 export function getConfig(): AppConfig {
   if (!cached) {
     const parsed = ConfigSchema.parse(process.env);
-    cached = { ...parsed, STATE_DATABASE_PATH: isAbsolute(parsed.STATE_DATABASE_PATH) ? parsed.STATE_DATABASE_PATH : resolve(WORKSPACE_ROOT, parsed.STATE_DATABASE_PATH) };
+    cached = {
+      ...parsed,
+      STATE_DATABASE_PATH: isAbsolute(parsed.STATE_DATABASE_PATH) ? parsed.STATE_DATABASE_PATH : resolve(WORKSPACE_ROOT, parsed.STATE_DATABASE_PATH),
+      DINOV2_FINGERPRINT: [parsed.DINOV2_MODEL_ID, parsed.DINOV2_MODEL_REVISION, parsed.DINOV2_DIMENSIONS, "pooler_output", "l2", parsed.IMAGE_EMBEDDING_MODE].join(":"),
+    };
   }
   return cached;
 }

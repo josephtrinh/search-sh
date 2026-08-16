@@ -12,6 +12,16 @@ export const rankingModes = [
 export const RankingModeSchema = z.enum(rankingModes);
 export type RankingMode = z.infer<typeof RankingModeSchema>;
 
+export const VisualModelSchema = z.enum(["siglip2", "dinov2"]);
+export type VisualModel = z.infer<typeof VisualModelSchema>;
+
+export interface VisualModelStatus {
+  active: VisualModel;
+  siglip2Ready: boolean;
+  dinov2Ready: boolean;
+  dinov2Fingerprint: string | null;
+}
+
 export const facetKeys = [
   "category",
   "material",
@@ -128,6 +138,7 @@ export interface SearchResponse {
   estimatedProductHits: number;
   processingTimeMs: number;
   timing: Record<string, number>;
+  visualModel: VisualModel;
 }
 
 export interface GroupDetail {
@@ -141,7 +152,7 @@ export interface GroupDetail {
   }>;
 }
 
-export const IndexRunModeSchema = z.enum(["full", "incremental"]);
+export const IndexRunModeSchema = z.enum(["full", "incremental", "visual_backfill"]);
 export type IndexRunMode = z.infer<typeof IndexRunModeSchema>;
 
 export interface IndexRunSummary {
@@ -152,6 +163,10 @@ export interface IndexRunSummary {
   totalProducts: number;
   embeddedImages: number;
   failedImages: number;
+  siglipEmbeddedImages: number;
+  siglipFailedImages: number;
+  dinov2EmbeddedImages: number;
+  dinov2FailedImages: number;
   captionedImages: number;
   cachedCaptions: number;
   failedCaptions: number;

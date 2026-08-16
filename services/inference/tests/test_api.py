@@ -24,14 +24,21 @@ def test_text_and_image_endpoints():
             "/v1/embed/visual-text", json={"texts": ["grey stone"], "priority": 0}
         )
         image = client.post("/v1/embed/images", json={"images": [make_image()], "priority": 0})
+        dinov2 = client.post(
+            "/v1/embed/images",
+            json={"images": [make_image()], "model": "dinov2", "priority": 0},
+        )
         caption = client.post(
             "/v1/caption/images", json={"images": [make_image()], "priority": 10}
         )
     assert text.status_code == 200
     assert visual_text.status_code == 200
     assert image.status_code == 200
+    assert dinov2.status_code == 200
     assert caption.status_code == 200
     assert len(text.json()["embeddings"][0]) == 32
     assert len(visual_text.json()["embeddings"][0]) == 32
     assert len(image.json()["embeddings"][0]) == 32
+    assert len(dinov2.json()["embeddings"][0]) == 32
+    assert dinov2.json()["model_id"] == "deterministic-dinov2-provider"
     assert caption.json()["captions"] == ["Test image with dimensions 8 by 8."]

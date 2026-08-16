@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, extname, resolve } from "node:path";
 import { z } from "zod";
-import { IndexRunModeSchema, defaultRankingConfig } from "@samplehub/contracts";
+import { IndexRunModeSchema, VisualModelSchema, defaultRankingConfig } from "@samplehub/contracts";
 import { getConfig, redisConnection, WORKSPACE_ROOT } from "../common/config";
 import { StateService } from "../state/state.service";
 import { SearchService } from "../search/search.service";
@@ -21,10 +21,16 @@ export class AdminController {
   constructor(private readonly state: StateService, private readonly search: SearchService) {}
   @Get("ranking") ranking() { return this.state.getRanking(); }
   @Patch("ranking") setRanking(@Body() body: unknown) { return this.state.setRanking(RankingSchema.parse(body)); }
+  @Get("visual-model") visualModel() { return this.search.visualModelStatus(); }
+  @Patch("visual-model") setVisualModel(@Body() body: unknown) {
+    const value = z.object({ model: VisualModelSchema }).parse(body);
+    return this.search.setVisualModel(value.model);
+  }
   @Get("index-runs") runs() { return this.state.listIndexRuns(); }
   @Get("index-runs/:id") run(@Param("id") id: string) { return this.state.getIndexRun(id); }
   @Post("index-runs") async start(@Body() body: { mode?: string }) {
-    const mode = IndexRunModeSchema.parse(body.mode); const run = this.state.createIndexRun(mode);
+    const mode = IndexRunModeSchema.parse(body.mode);
+    const run = this.state.createIndexRun(mode, mode === "visual_backfill" ? getConfig().DINOV2_FINGERPRINT : undefined);
     await this.queue.add(mode, { runId: run.id, mode }, { jobId: run.id, attempts: 1, removeOnComplete: 100, removeOnFail: 100 });
     return run;
   }
@@ -57,7 +63,9 @@ export class AdminController {
   }
   @Get("evaluation/runs") evaluationRuns() { return this.state.raw().prepare("SELECT * FROM evaluation_runs ORDER BY created_at DESC LIMIT 50").all(); }
   @Post("evaluation/runs") async createEvaluationRun() {
-    const id = randomUUID(); this.state.raw().prepare("INSERT INTO evaluation_runs(id,config_json,status) VALUES(?,?,'running')").run(id, JSON.stringify(this.state.getRanking()));
+    const id = randomUUID();
+    const visualModel = (await this.search.visualModelStatus()).active;
+    this.state.raw().prepare("INSERT INTO evaluation_runs(id,config_json,status) VALUES(?,?,'running')").run(id, JSON.stringify({ ranking: this.state.getRanking(), visualModel }));
     try {
       const report = await this.evaluate();
       this.state.raw().prepare("UPDATE evaluation_runs SET status='completed',report_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?").run(JSON.stringify(report), id);
@@ -68,12 +76,13 @@ export class AdminController {
     }
   }
   private async evaluate() {
+    const visualModel = (await this.search.visualModelStatus()).active;
     const queries = this.state.raw().prepare("SELECT * FROM evaluation_queries ORDER BY created_at").all() as Array<Record<string, unknown>>;
     const rows: Array<Record<string, unknown>> = [];
     for (const query of queries) {
       const judgments = this.state.raw().prepare("SELECT group_id,grade FROM judgments WHERE query_id=?").all(query.id) as Array<{ group_id: string; grade: number }>;
       const grades = new Map(judgments.map((item) => [item.group_id, item.grade]));
-      const modality = String(query.modality); const modes = modality === "text" ? ["keyword", "text_hybrid", "text_visual", "auto"] : modality === "image" ? ["image_visual"] : ["text_hybrid", "image_visual", "auto"];
+      const modality = String(query.modality); const modes = modality === "text" ? ["keyword", "text_hybrid", ...(visualModel === "siglip2" ? ["text_visual"] : []), "auto"] : modality === "image" ? ["image_visual"] : ["text_hybrid", "image_visual", "auto"];
       let file: Express.Multer.File | undefined;
       if (query.fixture_path) {
         const path = String(query.fixture_path); const extension = extname(path).toLowerCase();
@@ -88,7 +97,7 @@ export class AdminController {
       }
     }
     const grouped = new Map<string, number[]>(); for (const row of rows) { const key = `${row.mode}:${row.language}:${row.modality}`; grouped.set(key, [...(grouped.get(key) ?? []), Number(row.ndcgAt10)]); }
-    return { metric: "nDCG@10", generatedAt: new Date().toISOString(), queries: rows,
+    return { metric: "nDCG@10", generatedAt: new Date().toISOString(), visualModel, queries: rows,
       aggregates: [...grouped.entries()].map(([key, values]) => ({ slice: key, queryCount: values.length, ndcgAt10: values.reduce((sum, value) => sum + value, 0) / values.length })) };
   }
   private ndcg(actual: number[], ideal: number[]) {

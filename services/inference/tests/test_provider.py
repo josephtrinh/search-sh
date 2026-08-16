@@ -11,6 +11,7 @@ from PIL import Image
 from app.config import Settings
 from app.provider import (
     DeterministicEmbeddingProvider,
+    Dinov2Provider,
     FlorenceProvider,
     decode_image,
     resolve_device,
@@ -65,6 +66,93 @@ def test_resolve_device_rejects_unknown_backend():
     )
     with pytest.raises(RuntimeError, match="unsupported"):
         resolve_device(torch, "cuda", "auto")
+
+
+def test_dinov2_uses_pooler_output_and_l2_normalizes(monkeypatch):
+    calls = {}
+
+    class Tensor:
+        def __init__(self, values):
+            self.values = values
+
+        def to(self, _device):
+            return self
+
+        def cpu(self):
+            return self
+
+        def float(self):
+            return self
+
+        def numpy(self):
+            return np.asarray(self.values)
+
+    class Model:
+        config = SimpleNamespace(_commit_hash="resolved-dino", hidden_size=2)
+
+        def to(self, device):
+            calls["device"] = device
+            return self
+
+        def eval(self):
+            return self
+
+        def __call__(self, **_kwargs):
+            return SimpleNamespace(pooler_output=Tensor([[3.0, 4.0]]))
+
+    class Inputs(dict):
+        def to(self, _device):
+            return self
+
+    class Processor:
+        def __call__(self, **kwargs):
+            calls["processor"] = kwargs
+            return Inputs()
+
+    class AutoModel:
+        @classmethod
+        def from_pretrained(cls, *_args, **kwargs):
+            calls["model_load"] = kwargs
+            return Model()
+
+    class AutoImageProcessor:
+        @classmethod
+        def from_pretrained(cls, *_args, **kwargs):
+            calls["processor_load"] = kwargs
+            return Processor()
+
+    def normalize(tensor, p, dim):
+        calls["normalize"] = (tensor.values, p, dim)
+        return Tensor([[0.6, 0.8]])
+
+    fake_torch = SimpleNamespace(
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+        inference_mode=nullcontext,
+        nn=SimpleNamespace(functional=SimpleNamespace(normalize=normalize)),
+    )
+    fake_transformers = SimpleNamespace(
+        AutoImageProcessor=AutoImageProcessor, AutoModel=AutoModel
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    settings = Settings(
+        inference_backend="cpu",
+        dinov2_dimensions=2,
+        dinov2_model_revision="pinned-dino",
+    )
+    provider = Dinov2Provider(settings)
+    result = provider.embed_images([Image.new("RGB", (8, 6))])
+
+    assert result == [[0.6, 0.8]]
+    assert calls["normalize"] == ([[3.0, 4.0]], 2, 1)
+    assert calls["model_load"] == {
+        "revision": "pinned-dino",
+        "use_safetensors": True,
+    }
+    assert calls["processor_load"] == {"revision": "pinned-dino"}
+    assert calls["processor"]["images"][0].size == (8, 6)
+    assert provider.resolved_revision == "resolved-dino"
 
 
 def test_florence_uses_eager_attention_and_disables_generation_cache(monkeypatch):

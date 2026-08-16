@@ -19,7 +19,7 @@ export function isInferenceInputError(error: unknown): boolean {
 export class InferenceClient {
   async textPassages(texts: string[]): Promise<number[][]> { return this.call("embed/text", { texts, inputType: "passage", priority: 10 }); }
   async visualText(texts: string[]): Promise<number[][]> { return this.call("embed/visual-text", { texts, priority: 10 }); }
-  async images(images: Buffer[]): Promise<number[][]> { return this.call("images", { images: images.map((image) => image.toString("base64")), priority: 10 }); }
+  async images(images: Buffer[], model: "siglip2" | "dinov2" = "siglip2"): Promise<number[][]> { return this.call("images", { images: images.map((image) => image.toString("base64")), model, priority: 10 }); }
   async captions(images: Buffer[]): Promise<string[]> {
     const response = await fetch(`${config.INFERENCE_URL}/v1/caption/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images: images.map((image) => image.toString("base64")), priority: 10 }) });
     if (!response.ok) throw new InferenceHttpError("caption", response.status, (await response.text()).slice(0, 500));
@@ -58,7 +58,11 @@ export class MeiliClient {
       searchableAttributes: ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","generatedVisualCaption","description","detail","remarks","attributes"],
       filterableAttributes: ["groupId","category","material","color","origin","effect","brand","series","model","surface","edge","sizeGroup","waterAbsorption","fireResistance","price","availability"],
       sortableAttributes: ["price"], pagination: { maxTotalHits: 10000 }, faceting: { maxValuesPerFacet: 100, sortFacetValuesBy: { "*": "count" } },
-      embedders: { e5_text: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS }, siglip_image: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS } },
+      embedders: {
+        e5_text: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS },
+        siglip_image: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS },
+        dinov2_image: { source: "userProvided", dimensions: config.DINOV2_DIMENSIONS },
+      },
     };
     await this.wait((await this.request("PATCH", `/indexes/${uid}/settings`, settings)).taskUid);
   }
@@ -66,6 +70,34 @@ export class MeiliClient {
   async deleteDocuments(uid: string, ids: string[]) { if (ids.length) await this.wait((await this.request("POST", `/indexes/${uid}/documents/delete-batch`, ids)).taskUid); }
   async count(uid: string): Promise<number> { return Number((await this.request("GET", `/indexes/${uid}/stats`)).numberOfDocuments); }
   async hasEmbedder(uid: string, name: string): Promise<boolean> { const settings = await this.request("GET", `/indexes/${uid}/settings`); return Boolean(settings.embedders?.[name]); }
+  async ensureDinov2Embedder(uid: string) {
+    const settings = await this.request("GET", `/indexes/${uid}/settings/embedders`) as Record<string, { dimensions?: number } | undefined>;
+    const current = settings.dinov2_image;
+    if (current) {
+      if (current.dimensions !== config.DINOV2_DIMENSIONS) {
+        throw new Error(`Existing DINOv2 embedder has ${current.dimensions ?? "unknown"} dimensions; a full rebuild is required for ${config.DINOV2_DIMENSIONS} dimensions`);
+      }
+      return;
+    }
+    await this.wait((await this.request("PATCH", `/indexes/${uid}/settings/embedders`, {
+      ...settings,
+      dinov2_image: { source: "userProvided", dimensions: config.DINOV2_DIMENSIONS },
+    })).taskUid);
+  }
+  async vectors(uid: string, ids: string[]): Promise<Map<string, Record<string, unknown>>> {
+    if (!ids.length) return new Map();
+    const response = await this.request("POST", `/indexes/${uid}/documents/fetch`, { ids, fields: ["id"], retrieveVectors: true, limit: ids.length }) as { results?: Array<{ id: string; _vectors?: Record<string, unknown> }> };
+    return new Map((response.results ?? []).map((document) => [String(document.id), document._vectors ?? {}]));
+  }
+  async vectorPage(uid: string, offset: number, limit: number): Promise<Array<{ id: string; vectors: Record<string, unknown> }>> {
+    const response = await this.request("POST", `/indexes/${uid}/documents/fetch`, {
+      offset, limit, fields: ["id"], retrieveVectors: true,
+    }) as { results?: Array<{ id: string; _vectors?: Record<string, unknown> }> };
+    return (response.results ?? []).map((document) => ({ id: String(document.id), vectors: document._vectors ?? {} }));
+  }
+  async updateVectors(uid: string, documents: Array<{ id: string; _vectors: Record<string, unknown> }>) {
+    if (documents.length) await this.wait((await this.request("PUT", `/indexes/${uid}/documents`, documents)).taskUid);
+  }
   async swap(first: string, second: string) { await this.wait((await this.request("POST", "/swap-indexes", [{ indexes: [first, second] }])).taskUid); }
   async deleteIndex(uid: string) { if (await this.exists(uid)) await this.wait((await this.request("DELETE", `/indexes/${uid}`)).taskUid); }
   async smoke(uid: string) { await this.request("POST", `/indexes/${uid}/search`, { q: "stone", limit: 1, distinct: "groupId" }); }

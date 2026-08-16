@@ -17,7 +17,7 @@ from app.provider import create_providers, decode_image
 from app.scheduler import PriorityScheduler
 
 settings = get_settings()
-siglip, e5, florence = create_providers(settings)
+siglip, dinov2, e5, florence = create_providers(settings)
 scheduler = PriorityScheduler()
 
 
@@ -49,6 +49,7 @@ async def health() -> HealthResponse:
         queued=scheduler.queued,
         models={
             "siglip": model_health(siglip),
+            "dinov2": model_health(dinov2),
             "e5": model_health(e5),
             "florence": model_health(florence),
         },
@@ -94,8 +95,9 @@ async def embed_visual_text(request: TextEmbeddingRequest) -> EmbeddingResponse:
 async def embed_images(request: ImageEmbeddingRequest) -> EmbeddingResponse:
     try:
         images = [decode_image(encoded, settings) for encoded in request.images]
+        provider = dinov2 if request.model.value == "dinov2" else siglip
         return await embed_response(
-            siglip, request.priority, lambda: siglip.embed_images(images)
+            provider, request.priority, lambda: provider.embed_images(images)
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

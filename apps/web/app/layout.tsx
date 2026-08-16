@@ -8,6 +8,6 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return <html lang="en"><body>
     <header className="topbar"><Link className="brand" href="/"><span className="brand-mark">S</span><span>SampleHub <em>Search Lab</em></span></Link>
       <nav><Link href="/">Discover</Link><Link href="/admin">Evaluator</Link></nav></header>
-    {children}<footer>Local evaluation workspace · SigLIP 2 + Meilisearch</footer>
+    {children}<footer>Local evaluation workspace · SigLIP 2 / DINOv2 + Meilisearch</footer>
   </body></html>;
 }

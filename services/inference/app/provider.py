@@ -168,6 +168,52 @@ class SiglipProvider(ProviderMetadata):
         return embeddings.cpu().float().numpy().tolist()
 
 
+class Dinov2Provider(ProviderMetadata):
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.model_id = settings.dinov2_model_id
+        self.configured_revision = settings.dinov2_model_revision
+        self.dimensions = settings.dinov2_dimensions
+        self._torch: Any = None
+        self._model: Any = None
+        self._processor: Any = None
+
+    def _load(self) -> None:
+        if self.loaded:
+            return
+        import torch
+        from transformers import AutoImageProcessor, AutoModel
+
+        device = resolve_device(
+            torch, self.settings.dinov2_backend, self.settings.inference_backend
+        )
+        self._torch = torch
+        self._processor = AutoImageProcessor.from_pretrained(
+            self.model_id, revision=self.configured_revision
+        )
+        self._model = AutoModel.from_pretrained(
+            self.model_id, revision=self.configured_revision, use_safetensors=True
+        ).to(device).eval()
+        self.device = device
+        self.resolved_revision = getattr(self._model.config, "_commit_hash", None)
+        hidden_size = getattr(self._model.config, "hidden_size", None)
+        if hidden_size is not None and hidden_size != self.dimensions:
+            raise RuntimeError(
+                f"configured dimensions {self.dimensions} do not match model {hidden_size}"
+            )
+        self.loaded = True
+
+    def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
+        self._load()
+        inputs = self._processor(images=images, return_tensors="pt").to(self.device)
+        with self._torch.inference_mode():
+            outputs = self._model(**inputs)
+            embeddings = self._torch.nn.functional.normalize(
+                outputs.pooler_output, p=2, dim=1
+            )
+        return embeddings.cpu().float().numpy().tolist()
+
+
 class E5Provider(ProviderMetadata):
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -281,13 +327,19 @@ class FlorenceProvider(ProviderMetadata):
 
 def create_providers(
     settings: Settings,
-) -> tuple[ProviderMetadata, ProviderMetadata, ProviderMetadata]:
+) -> tuple[ProviderMetadata, ProviderMetadata, ProviderMetadata, ProviderMetadata]:
     if settings.inference_backend == "deterministic":
         return (
             DeterministicEmbeddingProvider(settings, "siglip", settings.embedding_dimensions),
+            DeterministicEmbeddingProvider(settings, "dinov2", settings.dinov2_dimensions),
             DeterministicEmbeddingProvider(
                 settings, "e5", settings.text_embedding_dimensions
             ),
             DeterministicCaptionProvider(settings),
         )
-    return SiglipProvider(settings), E5Provider(settings), FlorenceProvider(settings)
+    return (
+        SiglipProvider(settings),
+        Dinov2Provider(settings),
+        E5Provider(settings),
+        FlorenceProvider(settings),
+    )

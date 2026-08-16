@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
-import { useRef, useState, useTransition } from "react";
-import { facetKeys, type FacetKey, type SearchResponse } from "@samplehub/contracts";
+import { useEffect, useRef, useState, useTransition } from "react";
+import { facetKeys, type FacetKey, type SearchResponse, type VisualModel, type VisualModelStatus } from "@samplehub/contracts";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000/v1";
 const LABELS: Record<FacetKey, string> = { category: "Category", material: "Material", color: "Colour", origin: "Origin", effect: "Effect", brand: "Brand", series: "Series", model: "Model", surface: "Surface", edge: "Edge", sizeGroup: "Size group", waterAbsorption: "Water absorption", fireResistance: "Fire resistance", price: "Price", availability: "Availability" };
@@ -10,13 +10,14 @@ const MATCH_LABEL = { keyword: "Keyword match", semantic: "Semantic match", visu
 export function SearchWorkbench() {
   const [query, setQuery] = useState(""); const [image, setImage] = useState<File | null>(null); const [preview, setPreview] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResponse | null>(null); const [error, setError] = useState<string | null>(null); const [selected, setSelected] = useState<Record<string, string[]>>({});
-  const [mode, setMode] = useState("auto"); const [pending, startTransition] = useTransition(); const inputRef = useRef<HTMLInputElement>(null);
+  const [mode, setMode] = useState("auto"); const [visualModel, setVisualModel] = useState<VisualModel>("siglip2"); const [pending, startTransition] = useTransition(); const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { void fetch(`${API}/admin/visual-model`).then((response) => response.ok ? response.json() as Promise<VisualModelStatus> : null).then((status) => { if (status) { setVisualModel(status.active); if (status.active === "dinov2") setMode((current) => current === "text_visual" ? "auto" : current); } }).catch(() => undefined); }, []);
   function selectImage(file: File | null) { if (preview) URL.revokeObjectURL(preview); setImage(file); setPreview(file ? URL.createObjectURL(file) : null); }
   async function run(cursor?: string) {
     setError(null); const form = new FormData(); if (query.trim()) form.set("query", query.trim()); if (image) form.set("image", image); form.set("mode", mode);
     form.set("filters", JSON.stringify(selected)); form.set("limit", "24"); if (cursor) form.set("cursor", cursor);
     try { const response = await fetch(`${API}/search`, { method: "POST", body: form }); if (!response.ok) throw new Error((await response.json()).message ?? "Search failed");
-      const next = await response.json() as SearchResponse; setResult((previous) => {
+      const next = await response.json() as SearchResponse; setVisualModel(next.visualModel); setResult((previous) => {
         if (!cursor || !previous) return next;
         const hits = [...previous.hits, ...next.hits].filter((hit, index, all) => all.findIndex((candidate) => candidate.groupId === hit.groupId) === index);
         return { ...next, hits };
@@ -30,7 +31,7 @@ export function SearchWorkbench() {
     <form className="query-panel" onSubmit={submit}>
       <div className="query-main"><label htmlFor="query">Search the library</label><div className="search-row"><input id="query" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. warm ivory stone with a quiet grain" />
         <button className="primary" disabled={pending || (!query.trim() && !image)}>{pending ? "Searching…" : "Search"}</button></div>
-        <div className="mode-row"><span>Ranking</span>{["auto","keyword","text_hybrid","text_visual","image_visual"].map((value) => <button type="button" onClick={() => setMode(value)} className={mode === value ? "chip active" : "chip"} key={value}>{value.replaceAll("_", " ")}</button>)}</div></div>
+        <div className="mode-row"><span>Ranking</span>{["auto","keyword","text_hybrid","text_visual","image_visual"].map((value) => { const disabled = visualModel === "dinov2" && value === "text_visual"; return <button type="button" disabled={disabled} title={disabled ? "Text Visual requires SigLIP 2" : undefined} onClick={() => setMode(value)} className={mode === value ? "chip active" : "chip"} key={value}>{value.replaceAll("_", " ")}</button>; })}<span className="visual-model-label">Visual: {visualModel === "dinov2" ? "DINOv2" : "SigLIP 2"}</span></div></div>
       <button type="button" className={preview ? "image-drop has-image" : "image-drop"} onClick={() => inputRef.current?.click()}>
         {preview ? <img src={preview} alt="Selected search reference" /> : <><span className="upload-icon">＋</span><strong>Add a reference image</strong><small>JPEG, PNG or WebP · 10 MB max</small></>}
       </button><input ref={inputRef} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => selectImage(event.target.files?.[0] ?? null)} />

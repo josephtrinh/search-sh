@@ -1,5 +1,5 @@
-import { BadRequestException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
-import { facetKeys, FiltersSchema, SearchRequestSchema, type FacetKey, type GroupDetail, type ProductDocument, type RankingConfig, type SearchFilters, type SearchResponse } from "@samplehub/contracts";
+import { BadRequestException, ConflictException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
+import { facetKeys, FiltersSchema, SearchRequestSchema, type FacetKey, type GroupDetail, type ProductDocument, type RankingConfig, type SearchFilters, type SearchResponse, type VisualModel, type VisualModelStatus } from "@samplehub/contracts";
 import { getConfig } from "../common/config";
 import { StateService } from "../state/state.service";
 import { interpretQuery, interpretedFields, type AttributeVocabulary, type DerivedFilterGroup, type QueryInterpretation } from "./query-interpreter";
@@ -20,7 +20,7 @@ const FACET_FIELD: Record<FacetKey, string> = {
 @Injectable()
 export class SearchService {
   private readonly config = getConfig();
-  private schemaCache: { v2: boolean; expiresAt: number } | null = null;
+  private schemaCache: { v2: boolean; dinov2: boolean; expiresAt: number } | null = null;
   private vocabularyCache: { value: AttributeVocabulary; expiresAt: number } | null = null;
   constructor(private readonly state: StateService) {}
 
@@ -35,24 +35,39 @@ export class SearchService {
     return response.json();
   }
 
-  private async isV2Index(): Promise<boolean> {
-    if (this.schemaCache && this.schemaCache.expiresAt > Date.now()) return this.schemaCache.v2;
+  private async indexSchema(): Promise<{ v2: boolean; dinov2: boolean }> {
+    if (this.schemaCache && this.schemaCache.expiresAt > Date.now()) return this.schemaCache;
     try {
       const settings = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/settings`);
       const v2 = Boolean(settings.embedders?.e5_text);
-      this.schemaCache = { v2, expiresAt: Date.now() + 5000 };
-      return v2;
+      const dinov2 = Boolean(settings.embedders?.dinov2_image);
+      this.schemaCache = { v2, dinov2, expiresAt: Date.now() + 5000 };
+      return { v2, dinov2 };
     } catch (error) {
-      if (error instanceof NotFoundException) return false;
+      if (error instanceof NotFoundException) return { v2: false, dinov2: false };
       throw error;
     }
   }
 
-  private async embed(path: "text" | "visual-text" | "images", values: string[]): Promise<{ vectors: number[][]; milliseconds: number }> {
+  async visualModelStatus(): Promise<VisualModelStatus> {
+    const stored = this.state.getVisualModelStatus();
+    const schema = await this.indexSchema();
+    const dinov2Ready = stored.dinov2Ready && schema.dinov2;
+    return { ...stored, active: stored.active === "dinov2" && dinov2Ready ? "dinov2" : "siglip2", dinov2Ready };
+  }
+
+  async setVisualModel(model: VisualModel): Promise<VisualModelStatus> {
+    const status = await this.visualModelStatus();
+    if (model === "dinov2" && !status.dinov2Ready) throw new ConflictException("DINOv2 is not ready. Complete a successful visual backfill first.");
+    this.state.setVisualModel(model);
+    return this.visualModelStatus();
+  }
+
+  private async embed(path: "text" | "visual-text" | "images", values: string[], model: VisualModel = "siglip2"): Promise<{ vectors: number[][]; milliseconds: number }> {
     const started = performance.now();
     const response = await fetch(`${this.config.INFERENCE_URL}/v1/embed/${path}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(path === "images" ? { images: values, priority: 0 } : { texts: values, ...(path === "text" ? { inputType: "query" } : {}), priority: 0 }),
+      body: JSON.stringify(path === "images" ? { images: values, model, priority: 0 } : { texts: values, ...(path === "text" ? { inputType: "query" } : {}), priority: 0 }),
     });
     if (!response.ok) throw new BadRequestException(`Inference rejected the query: ${(await response.text()).slice(0, 300)}`);
     const payload = await response.json() as { embeddings: number[][] };
@@ -112,7 +127,10 @@ export class SearchService {
     const request = SearchRequestSchema.parse({ ...input, filters: typeof input.filters === "string" ? JSON.parse(input.filters) : input.filters, hasImage: Boolean(image) });
     const started = performance.now();
     const explicitFilters = FiltersSchema.parse(request.filters);
-    const v2 = await this.isV2Index();
+    const schema = await this.indexSchema();
+    const v2 = schema.v2;
+    const visualModel = (await this.visualModelStatus()).active;
+    if (visualModel === "dinov2" && request.mode === "text_visual") throw new BadRequestException("Text Visual mode requires SigLIP 2; switch the active visual model in Admin");
     if (!v2 && (explicitFilters.origin?.length || explicitFilters.effect?.length)) {
       throw new BadRequestException("Origin and effect filters require a completed v2 full rebuild");
     }
@@ -120,11 +138,11 @@ export class SearchService {
     const ranking = this.state.getRanking();
     const query = request.query ?? "";
     const needsSemantic = Boolean(query) && ["auto", "text_semantic", "text_hybrid"].includes(request.mode);
-    const needsVisualText = Boolean(query) && (["auto", "text_visual"].includes(request.mode) || (!v2 && needsSemantic));
+    const needsVisualText = visualModel === "siglip2" && Boolean(query) && (["auto", "text_visual"].includes(request.mode) || (!v2 && needsSemantic));
     const [semanticEmbedding, visualTextEmbedding, imageEmbedding] = await Promise.all([
       needsSemantic && v2 ? this.embed("text", [query]) : Promise.resolve(undefined),
       needsVisualText ? this.embed("visual-text", [query]) : Promise.resolve(undefined),
-      image ? this.embed("images", [image.buffer.toString("base64")]) : Promise.resolve(undefined),
+      image ? this.embed("images", [image.buffer.toString("base64")], visualModel) : Promise.resolve(undefined),
     ]);
     const interpretation: QueryInterpretation = request.mode === "auto" && Boolean(query)
       ? interpretQuery(query, await this.attributeVocabulary())
@@ -142,15 +160,15 @@ export class SearchService {
       visualText: visualTextEmbedding?.vectors[0],
       image: imageEmbedding?.vectors[0],
     };
-    let branches = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, preferredFilter, ranking, v2);
+    let branches = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, preferredFilter, ranking, v2, visualModel);
     if (hasDerived) {
       const preferred = branches.map((branch) => ({ ...branch, tier: "preferred" as const, weight: branch.weight * 0.85 }));
-      const fallback = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, explicitFilter, ranking, v2)
+      const fallback = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, explicitFilter, ranking, v2, visualModel)
         .map((branch) => ({ ...branch, tier: "fallback" as const, weight: branch.weight * 0.15 }));
       branches = [...preferred, ...fallback];
     }
     if (!branches.length) throw new BadRequestException("The selected mode is incompatible with the supplied query");
-    const offset = this.decodeCursor(request.cursor);
+    const offset = this.decodeCursor(request.cursor, visualModel);
     const activeFacetKeys = v2 ? facetKeys : facetKeys.filter((key) => key !== "origin" && key !== "effect");
     const ranked = await this.executeBranches(branches, request.limit, offset);
     const facetResult = await this.loadFacets(branches[0]!.query, activeFacetKeys);
@@ -162,10 +180,11 @@ export class SearchService {
         const values = facetResult.facetDistribution?.[FACET_FIELD[key]] ?? {};
         return { key, values: Object.entries(values).map(([value, count]) => ({ value, count })), enabled: Object.keys(values).length > 0 };
       }),
-      nextCursor: hits.length === request.limit ? this.encodeCursor(offset + hits.length) : null,
+      nextCursor: hits.length === request.limit ? this.encodeCursor(offset + hits.length, visualModel) : null,
       estimatedProductHits: facetResult.estimatedTotalHits ?? ranked.estimatedTotalHits ?? hits.length,
       processingTimeMs: performance.now() - started,
       timing: { inference: (semanticEmbedding?.milliseconds ?? 0) + (visualTextEmbedding?.milliseconds ?? 0) + (imageEmbedding?.milliseconds ?? 0), meilisearch: ranked.processingTimeMs },
+      visualModel,
     };
   }
 
@@ -207,8 +226,9 @@ export class SearchService {
     };
   }
 
-  private buildBranches(mode: string, query: string, vectors: { semantic?: number[]; visualText?: number[]; image?: number[] }, filter: string | undefined, ranking: RankingConfig, v2: boolean): SearchBranch[] {
+  private buildBranches(mode: string, query: string, vectors: { semantic?: number[]; visualText?: number[]; image?: number[] }, filter: string | undefined, ranking: RankingConfig, v2: boolean, visualModel: VisualModel = "siglip2"): SearchBranch[] {
     const semanticEmbedder = v2 ? "e5_text" : "siglip_text";
+    const imageEmbedder = visualModel === "dinov2" ? "dinov2_image" : "siglip_image";
     if (mode === "keyword") return query ? [this.branch("keyword", query, undefined, undefined, filter)] : [];
     if (mode === "text_semantic") return vectors.semantic ? [this.branch("semantic", "", vectors.semantic, semanticEmbedder, filter)] : [];
     if (mode === "text_hybrid") return [
@@ -216,13 +236,13 @@ export class SearchService {
       ...(vectors.semantic ? [this.branch("semantic", "", vectors.semantic, semanticEmbedder, filter, ranking.textSemanticWeight)] : []),
     ];
     if (mode === "text_visual") return vectors.visualText ? [this.branch("visual_text", "", vectors.visualText, "siglip_image", filter)] : [];
-    if (mode === "image_visual") return vectors.image ? [this.branch("image", "", vectors.image, "siglip_image", filter)] : [];
-    if (vectors.image && !query) return [this.branch("image", "", vectors.image, "siglip_image", filter)];
+    if (mode === "image_visual") return vectors.image ? [this.branch("image", "", vectors.image, imageEmbedder, filter)] : [];
+    if (vectors.image && !query) return [this.branch("image", "", vectors.image, imageEmbedder, filter)];
     if (vectors.image && query) return [
       this.branch("keyword", query, undefined, undefined, filter, ranking.combinedKeywordWeight),
       ...(vectors.semantic ? [this.branch("semantic", "", vectors.semantic, semanticEmbedder, filter, ranking.combinedSemanticWeight)] : []),
       ...(vectors.visualText ? [this.branch("visual_text", "", vectors.visualText, "siglip_image", filter, ranking.combinedVisualTextWeight)] : []),
-      this.branch("image", "", vectors.image, "siglip_image", filter, ranking.combinedImageWeight),
+      this.branch("image", "", vectors.image, imageEmbedder, filter, ranking.combinedImageWeight),
     ];
     return [
       ...(query ? [this.branch("keyword", query, undefined, undefined, filter, ranking.textKeywordWeight)] : []),
@@ -275,10 +295,19 @@ export class SearchService {
     const { _rankingScore: _, _federation: __, ...document } = hit;
     return document;
   }
-  private encodeCursor(offset: number): string { return Buffer.from(JSON.stringify({ v: 1, offset }), "utf8").toString("base64url"); }
-  private decodeCursor(cursor?: string): number {
+  private encodeCursor(offset: number, visualModel: VisualModel): string { return Buffer.from(JSON.stringify({ v: 2, offset, visualModel }), "utf8").toString("base64url"); }
+  private decodeCursor(cursor: string | undefined, visualModel: VisualModel): number {
     if (!cursor) return 0;
-    try { const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); if (value.v !== 1 || !Number.isSafeInteger(value.offset) || value.offset < 0) throw new Error(); return value.offset; }
-    catch { throw new BadRequestException("Invalid search cursor"); }
+    try {
+      const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+      if (value.v !== 2 || !Number.isSafeInteger(value.offset) || value.offset < 0) throw new Error();
+      if (value.visualModel !== visualModel) {
+        throw new BadRequestException("The active visual model changed; run the search again instead of reusing this cursor");
+      }
+      return value.offset;
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      throw new BadRequestException("Invalid search cursor");
+    }
   }
 }

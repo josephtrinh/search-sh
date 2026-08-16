@@ -13,6 +13,11 @@ class TextInputType(StrEnum):
     passage = "passage"
 
 
+class VisualModel(StrEnum):
+    siglip2 = "siglip2"
+    dinov2 = "dinov2"
+
+
 class TextEmbeddingRequest(BaseModel):
     texts: list[str] = Field(min_length=1, max_length=32)
     inputType: TextInputType = TextInputType.query
@@ -27,6 +32,7 @@ class TextEmbeddingRequest(BaseModel):
 
 class ImageEmbeddingRequest(BaseModel):
     images: list[str] = Field(min_length=1, max_length=8, description="Base64-encoded images")
+    model: VisualModel = VisualModel.siglip2
     priority: Priority = Priority.interactive
 
 

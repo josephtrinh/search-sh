@@ -19,19 +19,22 @@ async function main() {
     };
     const inference = new InferenceClient();
     const textVector = (await inference.textPassages([buildEmbeddingText(product)]))[0]!;
-    const visualVector = (await inference.visualText(["grey stone tile"]))[0]!;
-    await meili.add(uid, [{ ...product, _vectors: { e5_text: textVector, siglip_image: [visualVector] } }]);
+    const siglipVector = (await inference.visualText(["grey stone tile"]))[0]!;
+    const sampleImage = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=", "base64");
+    const dinov2Vector = (await inference.images([sampleImage], "dinov2"))[0]!;
+    await meili.add(uid, [{ ...product, _vectors: { e5_text: textVector, siglip_image: [siglipVector], dinov2_image: [dinov2Vector] } }]);
     const response = await fetch(`${config.MEILI_URL}/multi-search`, {
       method: "POST", headers: { Authorization: `Bearer ${config.MEILI_MASTER_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({ federation: { limit: 10, offset: 0, distinct: "groupId" }, queries: [
         { indexUid: uid, q: "grey stone", vector: textVector, hybrid: { embedder: "e5_text", semanticRatio: .5 }, federationOptions: { weight: .5 } },
-        { indexUid: uid, q: "", vector: visualVector, hybrid: { embedder: "siglip_image", semanticRatio: 1 }, federationOptions: { weight: .5 } },
+        { indexUid: uid, q: "", vector: siglipVector, hybrid: { embedder: "siglip_image", semanticRatio: 1 }, federationOptions: { weight: .5 } },
+        { indexUid: uid, q: "", vector: dinov2Vector, hybrid: { embedder: "dinov2_image", semanticRatio: 1 }, federationOptions: { weight: .5 } },
       ] }),
     });
     if (!response.ok) throw new Error(`Federated search failed: ${await response.text()}`);
     const result = await response.json() as { hits: Array<{ groupId: string }> };
     if (result.hits[0]?.groupId !== product.groupId) throw new Error("Federated distinct search did not return the expected group");
-    console.log(JSON.stringify({ multipleUserProvidedVectors: true, hybridSearch: true, weightedFederation: true, globalDistinct: true }, null, 2));
+    console.log(JSON.stringify({ multipleUserProvidedVectors: true, dinov2ImageSearch: true, hybridSearch: true, weightedFederation: true, globalDistinct: true }, null, 2));
   } finally {
     await meili.deleteIndex(uid);
   }
