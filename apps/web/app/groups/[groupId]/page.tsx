@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { GroupDetail } from "@samplehub/contracts";
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000/v1";
+const API = "http://127.0.0.1:8000/v1";
 export default async function GroupPage({ params }: { params: Promise<{ groupId: string }> }) {
   const { groupId } = await params; const response = await fetch(`${API}/groups/${encodeURIComponent(groupId)}`, { cache: "no-store" }); if (response.status === 404) notFound(); if (!response.ok) throw new Error("Unable to load product group");
   const group = await response.json() as GroupDetail;

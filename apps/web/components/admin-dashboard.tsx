@@ -2,7 +2,7 @@
 import { useEffect, useState, useTransition } from "react";
 import type { IndexRunMode, IndexRunSummary, RankingConfig, VisualModel, VisualModelStatus } from "@samplehub/contracts";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000/v1";
+const API = "/api";
 
 export function AdminDashboard() {
   const [runs, setRuns] = useState<IndexRunSummary[]>([]);
@@ -52,6 +52,6 @@ export function AdminDashboard() {
       <div className="run-list">{runs.length ? runs.slice(0, 6).map((run) => <div className="run" key={run.id}><span className={`run-state ${run.status}`}>{run.status}</span><div><strong>{run.mode.replaceAll("_", " ")} index</strong><small>{run.mode === "visual_backfill" && run.status === "running" && run.processedProducts === 0 ? "Preparing existing Meilisearch vectors…" : <>{run.processedProducts.toLocaleString()} / {run.totalProducts.toLocaleString()} products · SigLIP {run.siglipEmbeddedImages.toLocaleString()} / {run.siglipFailedImages.toLocaleString()} failed · DINOv2 {run.dinov2EmbeddedImages.toLocaleString()} / {run.dinov2FailedImages.toLocaleString()} failed · {run.captionedImages.toLocaleString()} captions · {run.cachedCaptions.toLocaleString()} cached</>}</small></div><progress value={run.processedProducts} max={Math.max(run.totalProducts, 1)} /></div>) : <p>No indexing runs yet.</p>}</div></section>
     <section className="panel ranking-panel"><div className="panel-heading"><div><p className="kicker">RANKING</p><h2>Balanced preset</h2></div><button disabled={!ranking || pending} onClick={() => perform(saveRanking)}>Save weights</button></div>
       {ranking ? <div className="sliders">{Object.entries(ranking).filter(([key]) => key !== "version").map(([key, value]) => <label key={key}><span>{key.replace(/([A-Z])/g, " $1")}</span><input type="range" min="0" max="1" step="0.05" value={value} onChange={(event) => setRanking({ ...ranking, [key]: Number(event.target.value) } as RankingConfig)} /><output>{value.toFixed(2)}</output></label>)}</div> : <p>Loading ranking configuration…</p>}</section>
-    <section className="panel eval-panel"><div className="panel-heading"><div><p className="kicker">RELEVANCE</p><h2>Judgment workspace</h2></div><span className="status-dot muted">nDCG@10</span></div><p>Create evaluation queries through the API, attach deliberate local image fixtures, and grade Brand+Series groups from 0–2. Reports use the globally selected visual model.</p><a href={`${API.replace(/\/v1$/, "")}/docs`} target="_blank" rel="noreferrer">Open evaluator API →</a></section>
+    <section className="panel eval-panel"><div className="panel-heading"><div><p className="kicker">RELEVANCE</p><h2>Judgment workspace</h2></div><span className="status-dot muted">nDCG@10</span></div><p>Create evaluation queries through the API, attach deliberate local image fixtures, and grade Brand+Series groups from 0–2. Reports use the globally selected visual model.</p><a href="/api-docs" target="_blank" rel="noreferrer">Open evaluator API →</a></section>
   </div>;
 }

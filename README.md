@@ -23,7 +23,7 @@ A local-first monorepo for grouped SampleHub product search. It combines Meilise
 
 Do not mix Node major versions after installing dependencies. `better-sqlite3` is a native module and must match the active Node ABI.
 
-## Setup
+## First-time setup
 
 ```bash
 nvm install
@@ -32,10 +32,24 @@ corepack enable
 cp .env.example .env
 pnpm install
 pnpm rebuild better-sqlite3
+pnpm --filter './packages/**' build
 pnpm infra:up
 ```
 
 Fill `.env` with the read-only source credentials. Keep the Meilisearch key at least 16 characters. If Redis or Meilisearch already occupies a configured port, use that compatible service or update both Compose and `.env` consistently.
+
+The shared workspace packages export compiled files from their ignored `dist` directories. `pnpm install` links those packages but does not compile them, and the filtered application `dev` commands below do not build them automatically. Build them before starting an application from a fresh clone.
+
+## Subsequent development sessions
+
+After the first-time setup, select the repository's Node version and start the local infrastructure:
+
+```bash
+nvm use
+pnpm infra:up
+```
+
+Run `pnpm install` again after the lockfile or package dependencies change. If files under `packages/` changed, rerun `pnpm --filter './packages/**' build` before starting the applications.
 
 Start inference:
 
@@ -60,7 +74,29 @@ pnpm --filter @samplehub/indexer dev
 pnpm --filter @samplehub/web dev
 ```
 
-Open `http://127.0.0.1:3000` for search and `http://127.0.0.1:3000/admin` for indexing and ranking. Local development intentionally has no authentication; do not expose it to an untrusted network.
+Open `http://127.0.0.1:3000` for search and `http://127.0.0.1:3000/admin` for indexing and ranking.
+
+### Access from the local network
+
+The web development server reads its bind address and port from the root `.env`. The defaults are:
+
+```env
+WEB_HOST=0.0.0.0
+WEB_PORT=3000
+WEB_ALLOWED_ORIGINS=
+```
+
+`0.0.0.0` makes the web server listen on all network interfaces. Other devices on the same trusted network can open the configured port using this computer's LAN address, for example:
+
+```text
+http://192.168.0.139:3000
+```
+
+Change `WEB_PORT` if that port is already occupied, then use the same port in the URL. The launcher automatically allows the machine's current LAN interface addresses for Next.js development assets and hot reload. Add comma-separated hostnames or addresses to `WEB_ALLOWED_ORIGINS` only when clients use an additional name that is not detected automatically.
+
+Browser API requests use the web server's same-origin `/api` proxy, so the API, inference service, Meilisearch, and Redis remain bound to `127.0.0.1` and do not need to be exposed separately. If the page is unreachable, allow incoming connections for Node.js or the configured TCP port in the host firewall. The LAN address may change when the router renews its DHCP lease.
+
+Local development intentionally has no authentication. Anyone who can reach the web server can also access the evaluator and indexing controls, so use LAN access only on a trusted network and never forward the configured web port to the internet.
 
 Auto text search extracts populated catalog attributes from the live facet vocabulary, applies cross-field material/effect families as preferred constraints, and uses weighted reciprocal-rank fusion. With SigLIP active it combines keyword, E5, and SigLIP text-to-image retrieval. With DINOv2 active, text search uses keyword and E5 only because DINOv2 has no text encoder. Empty facets are hidden automatically.
 
