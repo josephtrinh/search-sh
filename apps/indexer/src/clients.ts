@@ -1,5 +1,8 @@
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import type { VisualGeneration, VisualModel } from "@samplehub/contracts";
 import { config } from "./config";
+import { CatalogImageError } from "./image-normalizer";
+import { generationFromEmbedders, visualEmbedder } from "./visual-generation";
 
 export class InferenceHttpError extends Error {
   constructor(
@@ -18,8 +21,17 @@ export function isInferenceInputError(error: unknown): boolean {
 
 export class InferenceClient {
   async textPassages(texts: string[]): Promise<number[][]> { return this.call("embed/text", { texts, inputType: "passage", priority: 10 }); }
-  async visualText(texts: string[]): Promise<number[][]> { return this.call("embed/visual-text", { texts, priority: 10 }); }
-  async images(images: Buffer[], model: "siglip2" | "dinov2" | "dinov3" = "siglip2"): Promise<number[][]> { return this.call("images", { images: images.map((image) => image.toString("base64")), model, priority: 10 }); }
+  async visualText(texts: string[], generation: VisualGeneration = "current"): Promise<number[][]> { return this.call("embed/visual-text", { texts, generation, priority: 10 }); }
+  async images(images: Buffer[], model: VisualModel = "siglip2", generation: VisualGeneration = "current"): Promise<number[][]> { return this.call("images", { images: images.map((image) => image.toString("base64")), model, generation, priority: 10 }); }
+  async catalogImages(images: Buffer[], model: VisualModel, generation: VisualGeneration): Promise<number[][][]> {
+    const response = await fetch(`${config.INFERENCE_URL}/v1/embed/catalog-images`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ images: images.map((image) => image.toString("base64")), model, generation, priority: 10 }),
+    });
+    if (!response.ok) throw new InferenceHttpError("catalog-images", response.status, (await response.text()).slice(0, 500));
+    return ((await response.json()) as { embedding_sets: number[][][] }).embedding_sets;
+  }
   async captions(images: Buffer[]): Promise<string[]> {
     const response = await fetch(`${config.INFERENCE_URL}/v1/caption/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images: images.map((image) => image.toString("base64")), priority: 10 }) });
     if (!response.ok) throw new InferenceHttpError("caption", response.status, (await response.text()).slice(0, 500));
@@ -40,7 +52,14 @@ export class ImageSource {
     const key = decodeURIComponent(keyOrUrl.startsWith(base) ? keyOrUrl.slice(base.length) : keyOrUrl);
     const result = await this.s3.send(new GetObjectCommand({ Bucket: config.AWS_BUCKET_NAME, Key: key }));
     if (!result.Body) throw new Error("S3 object had no body");
-    return Buffer.from(await result.Body.transformToByteArray());
+    if (result.ContentLength !== undefined && result.ContentLength > config.CATALOG_IMAGE_MAX_SOURCE_BYTES) {
+      throw new CatalogImageError("catalog_image_source_too_large", `S3 object is ${result.ContentLength} bytes; maximum catalog image source is ${config.CATALOG_IMAGE_MAX_SOURCE_BYTES}`);
+    }
+    const buffer = Buffer.from(await result.Body.transformToByteArray());
+    if (buffer.length > config.CATALOG_IMAGE_MAX_SOURCE_BYTES) {
+      throw new CatalogImageError("catalog_image_source_too_large", `S3 object is ${buffer.length} bytes; maximum catalog image source is ${config.CATALOG_IMAGE_MAX_SOURCE_BYTES}`);
+    }
+    return buffer;
   }
 }
 
@@ -51,18 +70,22 @@ export class MeiliClient {
     return response.status === 204 ? undefined : response.json();
   }
   async exists(uid: string): Promise<boolean> { const response = await fetch(`${config.MEILI_URL}/indexes/${uid}`, { headers: { Authorization: `Bearer ${config.MEILI_MASTER_KEY}` } }); return response.ok; }
+  async listIndexes(): Promise<string[]> {
+    const response = await this.request("GET", "/indexes?limit=1000") as { results?: Array<{ uid?: string }> };
+    return (response.results ?? []).flatMap((entry) => entry.uid ? [entry.uid] : []);
+  }
   async create(uid: string) { await this.wait((await this.request("POST", "/indexes", { uid, primaryKey: "id" })).taskUid); }
-  async configure(uid: string) {
+  async configure(uid: string, generation: VisualGeneration = "current") {
     const settings = {
-      displayedAttributes: ["id","groupId","brand","normalizedBrand","series","normalizedSeries","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","price","availability","width","height","length","depth","area","updatedAt","thumbnailId","images","attributes"],
+      displayedAttributes: ["id","groupId","brand","normalizedBrand","series","normalizedSeries","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","price","availability","width","height","length","depth","area","updatedAt","thumbnailId","images","attributes","_visualEmbeddingState"],
       searchableAttributes: ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","generatedVisualCaption","description","detail","remarks","attributes"],
       filterableAttributes: ["groupId","category","material","color","origin","effect","brand","series","model","surface","edge","sizeGroup","waterAbsorption","fireResistance","price","availability"],
       sortableAttributes: ["price"], pagination: { maxTotalHits: 10000 }, faceting: { maxValuesPerFacet: 100, sortFacetValuesBy: { "*": "count" } },
       embedders: {
         e5_text: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS },
-        siglip_image: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS },
-        dinov2_image: { source: "userProvided", dimensions: config.DINOV2_DIMENSIONS },
-        dinov3_image: { source: "userProvided", dimensions: config.DINOV3_DIMENSIONS },
+        [visualEmbedder("siglip2", generation)]: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS },
+        [visualEmbedder("dinov2", generation)]: { source: "userProvided", dimensions: config.DINOV2_DIMENSIONS },
+        [visualEmbedder("dinov3", generation)]: { source: "userProvided", dimensions: config.DINOV3_DIMENSIONS },
       },
     };
     await this.wait((await this.request("PATCH", `/indexes/${uid}/settings`, settings)).taskUid);
@@ -71,9 +94,13 @@ export class MeiliClient {
   async deleteDocuments(uid: string, ids: string[]) { if (ids.length) await this.wait((await this.request("POST", `/indexes/${uid}/documents/delete-batch`, ids)).taskUid); }
   async count(uid: string): Promise<number> { return Number((await this.request("GET", `/indexes/${uid}/stats`)).numberOfDocuments); }
   async hasEmbedder(uid: string, name: string): Promise<boolean> { const settings = await this.request("GET", `/indexes/${uid}/settings`); return Boolean(settings.embedders?.[name]); }
-  async ensureVisualEmbedder(uid: string, model: "dinov2" | "dinov3") {
+  async generation(uid: string): Promise<VisualGeneration> {
+    const settings = await this.request("GET", `/indexes/${uid}/settings/embedders`) as Record<string, unknown>;
+    return generationFromEmbedders(settings);
+  }
+  async ensureVisualEmbedder(uid: string, model: "dinov2" | "dinov3", generation: VisualGeneration) {
     const settings = await this.request("GET", `/indexes/${uid}/settings/embedders`) as Record<string, { dimensions?: number } | undefined>;
-    const embedder = `${model}_image`;
+    const embedder = visualEmbedder(model, generation);
     const dimensions = model === "dinov2" ? config.DINOV2_DIMENSIONS : config.DINOV3_DIMENSIONS;
     const label = model === "dinov2" ? "DINOv2" : "DINOv3";
     const current = settings[embedder];
@@ -88,10 +115,10 @@ export class MeiliClient {
       [embedder]: { source: "userProvided", dimensions },
     })).taskUid);
   }
-  async vectors(uid: string, ids: string[]): Promise<Map<string, Record<string, unknown>>> {
+  async vectors(uid: string, ids: string[]): Promise<Map<string, { vectors: Record<string, unknown>; state?: Record<string, unknown> }>> {
     if (!ids.length) return new Map();
-    const response = await this.request("POST", `/indexes/${uid}/documents/fetch`, { ids, fields: ["id"], retrieveVectors: true, limit: ids.length }) as { results?: Array<{ id: string; _vectors?: Record<string, unknown> }> };
-    return new Map((response.results ?? []).map((document) => [String(document.id), document._vectors ?? {}]));
+    const response = await this.request("POST", `/indexes/${uid}/documents/fetch`, { ids, fields: ["id", "_visualEmbeddingState"], retrieveVectors: true, limit: ids.length }) as { results?: Array<{ id: string; _vectors?: Record<string, unknown>; _visualEmbeddingState?: Record<string, unknown> }> };
+    return new Map((response.results ?? []).map((document) => [String(document.id), { vectors: document._vectors ?? {}, state: document._visualEmbeddingState }]));
   }
   async vectorPage(uid: string, offset: number, limit: number): Promise<Array<{ id: string; vectors: Record<string, unknown> }>> {
     const response = await this.request("POST", `/indexes/${uid}/documents/fetch`, {
@@ -99,7 +126,10 @@ export class MeiliClient {
     }) as { results?: Array<{ id: string; _vectors?: Record<string, unknown> }> };
     return (response.results ?? []).map((document) => ({ id: String(document.id), vectors: document._vectors ?? {} }));
   }
-  async updateVectors(uid: string, documents: Array<{ id: string; _vectors: Record<string, unknown> }>) {
+  async updateVectors(uid: string, documents: Array<{ id: string; _vectors: Record<string, unknown>; _visualEmbeddingState?: Record<string, unknown> }>) {
+    await this.updateDocuments(uid, documents);
+  }
+  async updateDocuments(uid: string, documents: Array<Record<string, unknown>>) {
     if (documents.length) await this.wait((await this.request("PUT", `/indexes/${uid}/documents`, documents)).taskUid);
   }
   async swap(first: string, second: string) { await this.wait((await this.request("POST", "/swap-indexes", [{ indexes: [first, second] }])).taskUid); }

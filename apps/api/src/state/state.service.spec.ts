@@ -23,16 +23,21 @@ describe("StateService", () => {
     const run = service.createIndexRun("full"); expect(run.status).toBe("queued");
     expect(run.captionedImages).toBe(0); expect(run.cachedCaptions).toBe(0); expect(run.failedCaptions).toBe(0);
     expect(run.siglipEmbeddedImages).toBe(0); expect(run.dinov2EmbeddedImages).toBe(0); expect(run.dinov3EmbeddedImages).toBe(0);
+    expect(run.normalizedImages).toBe(0); expect(run.visualEligibleProducts).toBe(0); expect(run.qualityWarning).toBeNull();
     expect(service.requestCancellation(run.id)?.status).toBe("cancelling");
+    expect(service.markCancelled(run.id)?.status).toBe("cancelled");
   });
-  it("migrates legacy runs and accepts visual backfills", () => {
+  it("migrates legacy runs and accepts specialized backfills", () => {
     expect(service.getIndexRun("legacy-run")?.status).toBe("completed");
     expect(service.createIndexRun("visual_backfill", "test-fingerprint").mode).toBe("visual_backfill");
     expect(service.createIndexRun("dinov3_backfill", "test-dinov3-fingerprint").mode).toBe("dinov3_backfill");
+    expect(service.createIndexRun("caption_backfill", "test-caption-fingerprint").mode).toBe("caption_backfill");
+    expect(service.createIndexRun("limited_full", undefined, { visualGeneration: "current", productLimit: 10000 })).toMatchObject({ mode: "limited_full", visualGeneration: "current", productLimit: 10000 });
   });
   it("keeps SigLIP active until the current DINOv2 fingerprint is ready", () => {
     expect(service.getVisualModelStatus()).toMatchObject({ active: "siglip2", dinov2Ready: false, dinov3Ready: false });
     expect(service.setVisualModel("dinov2").active).toBe("siglip2");
+    expect(service.getConfiguredVisualModel()).toBe("dinov2");
   });
   it("activates DINOv3 only for the current fingerprint", () => {
     service.raw().prepare(`INSERT INTO settings(key,value_json) VALUES('dinov3_ready_fingerprint',?)

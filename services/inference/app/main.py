@@ -7,17 +7,18 @@ from app.config import get_settings
 from app.models import (
     CaptionRequest,
     CaptionResponse,
+    CatalogEmbeddingResponse,
     EmbeddingResponse,
     HealthResponse,
     ImageEmbeddingRequest,
     ModelHealth,
     TextEmbeddingRequest,
 )
-from app.provider import create_providers, decode_image
+from app.provider import create_providers, decode_image, embed_catalog_images
 from app.scheduler import PriorityScheduler
 
 settings = get_settings()
-siglip, dinov2, dinov3, e5, florence = create_providers(settings)
+siglip, siglip_legacy, dinov2, dinov3, e5, florence = create_providers(settings)
 scheduler = PriorityScheduler()
 
 
@@ -49,6 +50,7 @@ async def health() -> HealthResponse:
         queued=scheduler.queued,
         models={
             "siglip": model_health(siglip),
+            "siglip_legacy": model_health(siglip_legacy),
             "dinov2": model_health(dinov2),
             "dinov3": model_health(dinov3),
             "e5": model_health(e5),
@@ -90,8 +92,9 @@ async def embed_text(request: TextEmbeddingRequest) -> EmbeddingResponse:
 @app.post("/v1/embed/visual-text", response_model=EmbeddingResponse)
 async def embed_visual_text(request: TextEmbeddingRequest) -> EmbeddingResponse:
     try:
+        provider = siglip_legacy if request.generation.value == "legacy" else siglip
         return await embed_response(
-            siglip, request.priority, lambda: siglip.embed_texts(request.texts)
+            provider, request.priority, lambda: provider.embed_texts(request.texts)
         )
     except (ValueError, RuntimeError) as exc:
         raise request_error(exc) from exc
@@ -101,10 +104,45 @@ async def embed_visual_text(request: TextEmbeddingRequest) -> EmbeddingResponse:
 async def embed_images(request: ImageEmbeddingRequest) -> EmbeddingResponse:
     try:
         images = [decode_image(encoded, settings) for encoded in request.images]
-        providers = {"siglip2": siglip, "dinov2": dinov2, "dinov3": dinov3}
+        providers = {
+            "siglip2": siglip_legacy if request.generation.value == "legacy" else siglip,
+            "dinov2": dinov2,
+            "dinov3": dinov3,
+        }
         provider = providers[request.model.value]
         return await embed_response(
-            provider, request.priority, lambda: provider.embed_images(images)
+            provider,
+            request.priority,
+            lambda: provider.embed_images(images, request.generation.value),
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise request_error(exc) from exc
+
+
+@app.post("/v1/embed/catalog-images", response_model=CatalogEmbeddingResponse)
+async def embed_catalog(request: ImageEmbeddingRequest) -> CatalogEmbeddingResponse:
+    try:
+        images = [decode_image(encoded, settings) for encoded in request.images]
+        providers = {
+            "siglip2": siglip_legacy if request.generation.value == "legacy" else siglip,
+            "dinov2": dinov2,
+            "dinov3": dinov3,
+        }
+        provider = providers[request.model.value]
+        embedding_sets, queue_ms, inference_ms = await scheduler.submit(
+            request.priority,
+            lambda: embed_catalog_images(
+                provider, images, request.generation.value, settings.max_image_batch
+            ),
+        )
+        return CatalogEmbeddingResponse(
+            embedding_sets=embedding_sets,
+            dimensions=provider.dimensions,
+            model_id=provider.model_id,
+            model_revision=provider.resolved_revision or provider.configured_revision,
+            device=provider.device,
+            queue_wait_ms=queue_ms,
+            inference_ms=inference_ms,
         )
     except (ValueError, RuntimeError) as exc:
         raise request_error(exc) from exc

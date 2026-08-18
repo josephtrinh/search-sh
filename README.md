@@ -19,7 +19,7 @@ A local-first monorepo for grouped SampleHub product search. It combines Meilise
 - Python 3.11–3.13 and `uv`
 - Docker with Compose
 - read-only SampleHub MySQL and S3 credentials
-- at least 15 GB of free model/cache space when using the local DINOv3 ViT-H+ archive
+- at least 10 GB of free model/cache space when using the local DINOv3 ViT-B archive
 
 Do not mix Node major versions after installing dependencies. `better-sqlite3` is a native module and must match the active Node ABI.
 
@@ -41,10 +41,10 @@ Fill `.env` with the read-only source credentials. Keep the Meilisearch key at l
 DINOv3 is a gated Meta model. After accepting its license, place the downloaded archive at:
 
 ```text
-temp/dinov3-vith16plus-pretrain-lvd1689m-transformers-default-v1.tar.gz
+temp/facebookdinov3-vitb16-pretrain-lvd1689m-transformers-default-v1.tar.gz
 ```
 
-The inference service verifies the configured SHA-256 and safely extracts it into the gitignored `temp/dinov3-vith16plus-pretrain-lvd1689m` directory when DINOv3 is first requested. Keep the archive intact for setup on another computer; neither the gated weights nor the extracted directory are committed to the repository.
+The inference service verifies the configured SHA-256 and safely extracts it into the gitignored `temp/dinov3-vitb16-pretrain-lvd1689m` directory when DINOv3 is first requested. Keep the archive intact for setup on another computer; neither the gated weights nor the extracted directory are committed to the repository.
 
 The shared workspace packages export compiled files from their ignored `dist` directories. `pnpm install` links those packages but does not compile them, and the filtered application `dev` commands below do not build them automatically. Build them before starting an application from a fresh clone.
 
@@ -69,7 +69,7 @@ Models load lazily, so `/health` can be healthy while its `loaded` fields are fa
 
 - SigLIP 2 for image and text-to-image embeddings
 - DINOv2 Base for the optional image-only visual retrieval experiment
-- the local DINOv3 ViT-H+/16 archive for the optional 1,280-dimensional image-only experiment
+- the local DINOv3 ViT-B/16 archive for the optional 768-dimensional image-only experiment
 - multilingual E5 Base for query and product-passage embeddings
 - Florence 2 Base FT for generated detailed captions
 
@@ -113,7 +113,9 @@ Auto text search extracts populated catalog attributes from the live facet vocab
 
 `IMAGE_EMBEDDING_MODE=thumbnail` embeds the original image selected by `products.thumbnail_id`, falling back to the first ordered original image. `all` embeds every product image in batches of eight. The same selection policy is used for SigLIP, DINOv2, and DINOv3.
 
-Florence always captions only that representative thumbnail/fallback image, even in `all` mode. Captions and provenance are cached in local SQLite by image content hash. They are searchable but are not displayed or returned as trusted product copy. Changing image mode, a model revision, a caption task, dimensions, indexed fields, or index settings requires a full rebuild.
+Current-generation catalog embeddings preserve the whole image and add square long-axis views only when its aspect ratio exceeds 1.2. Depending on length, two to four evenly spaced tiles are added, capped at five vectors per source image. SigLIP 2 uses the pinned NaFlex Base model with a 576-patch budget so the whole view keeps its native aspect ratio. DINOv2 uses 392×392 inputs and DINOv3 uses 384×384 inputs; both letterbox instead of stretching or center-cropping and use the normalized 50/50 CLS plus patch-mean descriptor. Interactive query images remain a single vector: native-aspect NaFlex for SigLIP and letterboxed for DINO.
+
+Florence always captions only that representative thumbnail/fallback image, even in `all` mode. Captions and provenance are cached in local SQLite by image content hash. They are searchable but are not displayed or returned as trusted product copy. On an existing v2 index, changing the caption model, revision, task, or generation settings can be applied with the dedicated caption backfill below. Changing image mode, vector dimensions, indexed fields, or index settings still requires a full rebuild.
 
 ## First index or v2 migration
 
@@ -124,27 +126,43 @@ pnpm --filter @samplehub/indexer preflight
 pnpm --filter @samplehub/indexer smoke:search
 ```
 
-Start a **full rebuild** from `/admin`. The existing stable index remains searchable using legacy SigLIP text routing until the new E5 shadow index passes validation and swaps in. Incremental indexing intentionally refuses a legacy index.
+Start a **full rebuild** from `/admin`. New full rebuilds always create the current visual generation under `siglip_image_v2`, `dinov2_image_v2`, and `dinov3_image_v2`. The existing stable index remains searchable with its legacy model and preprocessing until the current-generation shadow passes validation and swaps in. Incremental indexing detects the stable generation and preserves its embedder names and preprocessing, so newly added catalog products remain compatible before or after the migration.
 
 The first Florence pass is much slower than later rebuilds. Cached captions survive a failed or cancelled rebuild, so restarting the full run reuses completed work. On macOS, prevent sleep during a long run with `caffeinate` in a separate terminal.
+
+Catalog images over 25 million decoded pixels or 9 MiB compressed are normalized once before any model sees them: EXIF orientation is applied, aspect ratio is preserved within a 4096-pixel edge, transparency is flattened to white, and the result is encoded as high-quality 4:4:4 JPEG. Normal inputs remain unchanged. Sources over 150 million pixels or 50 MiB are rejected as unsafe. These limits and the output envelope are configurable with the `CATALOG_IMAGE_*` settings in `.env`; changing them changes the visual fingerprints.
 
 The stable index is replaced only after:
 
 1. every eligible source product is processed;
 2. the shadow document count matches the source count;
-3. at least 95% of selected images embed successfully for each configured visual provider; and
+3. at least 95% of image-eligible products have one or more successful vectors for each configured visual provider; and
 4. the search smoke query succeeds.
 
 Caption failures are reported separately and do not block the swap; affected products still receive structured E5 embeddings.
 If one image in an inference batch is rejected with HTTP 422, the indexer recursively splits that batch and records only the rejected image. Valid images that shared the original batch continue normally.
 
+## Compare generations on a limited catalog sample
+
+In `/admin`, choose a product limit from 1 through 25,000 and build a **legacy preview** and/or **current preview**. Both generations use the same deterministic source-ID sample, making model comparisons directly comparable. The default limit is 10,000.
+
+Preview builds use their own shadow indexes and never replace stable, alter incremental watermarks, or affect shopper search until explicitly selected under **Search index scope**. Their minimum product coverage is 90%; completion below the 95% production target is shown as a warning. Products with no selected image are excluded from the denominator, and products with visual failures still retain structured text and E5 search. Only a completed, count-matched, image-gated, smoke-tested preview can be selected. Evaluation reports record the selected scope, visual generation, and visual model. Rebuilding a preview leaves its previous completed version searchable until the replacement succeeds.
+
+## Refresh captions and E5 without a full rebuild
+
+After changing `CAPTION_TASK` or other Florence generation settings in `.env`, restart inference, API, and indexer, then click **Backfill captions + E5** in `/admin`. The `caption_backfill` run keeps the stable index searchable and does not invoke SigLIP, DINOv2, or DINOv3.
+
+For each product, the worker captions only the representative image, reuses cache entries matching the current image hash/model/revision/task/generation settings, rebuilds the E5 passage from catalog fields plus that caption, and replaces only `generatedVisualCaption` and `e5_text`. Every existing visual vector is copied back unchanged. Changing from `<DETAILED_CAPTION>` to `<MORE_DETAILED_CAPTION>` produces cache misses for the new task; completed new-task captions are reused after cancellation or failure.
+
+If an individual image cannot be downloaded or captioned, the existing indexed caption and E5 vector are preserved and the failure is reported for a later retry. Products without images are updated to a null generated caption and structured-text-only E5 vector. Schema, E5 service, document-count, missing-vector, and Meilisearch update failures stop the run because continuing would be unsafe. Successful batches are in-place and remain searchable if a later batch fails or the run is cancelled.
+
 ## Try DINOv2 or DINOv3 without replacing existing vectors
 
 The stable index can hold all three visual vector sets. SigLIP remains the default, and switching the active model in `/admin` is immediate once the selected DINO model is ready. The selection is stored in `data/search-state.sqlite` and applies globally to search and evaluation.
 
-For an existing v2 index, restart inference, API, and indexer after pulling these changes, then click **Backfill DINOv2** or **Backfill DINOv3** in `/admin`. Each is an independent in-place vector backfill: it keeps the current searchable index, documents, other vector providers, and captions. A full rebuild is not required, and the two DINO backfills may run in either order. Do not run either backfill against a legacy `siglip_text` index; the UI/API will reject it.
+For a current-generation stable index, restart inference, API, and indexer after pulling these changes, then click **Backfill DINOv2** or **Backfill DINOv3** in `/admin`. Each is an independent in-place vector backfill: it keeps the current searchable index, documents, other vector providers, and captions. A full rebuild is not required, and the two DINO backfills may run in either order. A legacy-generation stable index is rejected because adding current preprocessing under a legacy embedder name would make the comparison invalid; run a current full rebuild first.
 
-Each backfill is resumable for the same model fingerprint. On the first run it safely initializes every existing document with the target embedder set to `null` before registering that `userProvided` embedder; Meilisearch requires this opt-out for documents without the new vector. The worker fetches each document's current `_vectors`, verifies E5 and SigLIP are present, merges only the target DINO vector, and writes the complete vector map back. The run may remain at 0 processed while DINOv3 verifies/extracts its archive, loads the model, and initializes Meilisearch. A model becomes selectable only after all eligible products are visited and at least 95% of selected images succeed.
+Each backfill is resumable for the same model fingerprint. On the first run it safely initializes every existing document with the target embedder set to `null` before registering that `userProvided` embedder; Meilisearch requires this opt-out for documents without the new vector. The worker fetches each document's current `_vectors`, verifies E5 and SigLIP are present, merges only the target DINO vector, and writes the complete vector map back. The run may remain at 0 processed while DINOv3 verifies/extracts its archive, loads the model, and initializes Meilisearch. A model becomes selectable only after all eligible products are visited and at least 95% of image-eligible products have a successful vector.
 
 In either DINO mode:
 
@@ -153,7 +171,9 @@ In either DINO mode:
 - text-only search uses E5 semantic and keyword branches;
 - `text_visual` is disabled because DINOv2 and DINOv3 have no compatible text encoder.
 
-Switch among **SigLIP 2**, **DINOv2**, and **DINOv3** in `/admin`; stored vector sets remain available. Full rebuilds create all three. Incremental runs maintain every provider registered on the stable index. Changing DINOv3's archive checksum or `DINOV3_IMAGE_SIZE` creates a new fingerprint and requires another DINOv3 backfill. Changing vector dimensions requires a full rebuild. `DINOV3_IMAGE_SIZE` defaults to 224 and accepts square multiples of 16 from 224 through 512; larger values substantially increase ViT-H+ latency and memory use.
+Switch among **SigLIP 2**, **DINOv2**, and **DINOv3** in `/admin`; this selects one visual model and never ensembles their scores or vectors. Full rebuilds create all three. Incremental runs maintain every provider registered on the stable index. Changing crop policy, pooling, model revision, resolution, or patch budget changes its fingerprint and requires the corresponding rebuild/backfill. DINOv2 defaults to 392 pixels (multiples of 14 from 224–518); DINOv3 defaults to 384 pixels (multiples of 16 from 224–512).
+
+If the stable index was configured with the former 1,280-dimensional ViT-H+ DINOv3 embedder, rebuild it before using ViT-B because Meilisearch cannot change that embedder to 768 dimensions in place. Once the stable index is current-generation, the normal **Backfill DINOv3** run can refresh that model without rerunning SigLIP, DINOv2, E5, or Florence.
 
 ## Verify and stop
 

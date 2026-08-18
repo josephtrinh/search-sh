@@ -15,8 +15,16 @@ export type RankingMode = z.infer<typeof RankingModeSchema>;
 export const VisualModelSchema = z.enum(["siglip2", "dinov2", "dinov3"]);
 export type VisualModel = z.infer<typeof VisualModelSchema>;
 
+export const VisualGenerationSchema = z.enum(["legacy", "current"]);
+export type VisualGeneration = z.infer<typeof VisualGenerationSchema>;
+
+export const IndexScopeSchema = z.enum(["stable", "preview_legacy", "preview_current"]);
+export type IndexScope = z.infer<typeof IndexScopeSchema>;
+
 export interface VisualModelStatus {
   active: VisualModel;
+  generation: VisualGeneration;
+  scope: IndexScope;
   siglip2Ready: boolean;
   dinov2Ready: boolean;
   dinov2Fingerprint: string | null;
@@ -155,15 +163,19 @@ export interface GroupDetail {
 
 export const IndexRunModeSchema = z.enum([
   "full",
+  "limited_full",
   "incremental",
   "visual_backfill",
   "dinov3_backfill",
+  "caption_backfill",
 ]);
 export type IndexRunMode = z.infer<typeof IndexRunModeSchema>;
 
 export interface IndexRunSummary {
   id: string;
   mode: IndexRunMode;
+  visualGeneration: VisualGeneration | null;
+  productLimit: number | null;
   status:
     | "queued"
     | "running"
@@ -184,10 +196,27 @@ export interface IndexRunSummary {
   captionedImages: number;
   cachedCaptions: number;
   failedCaptions: number;
+  normalizedImages: number;
+  rejectedSourceImages: number;
+  visualEligibleProducts: number;
+  siglipCoveredProducts: number;
+  dinov2CoveredProducts: number;
+  dinov3CoveredProducts: number;
+  visualCoverageThreshold: number | null;
+  qualityWarning: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   error: string | null;
 }
+
+export interface IndexScopeStatus {
+  active: IndexScope;
+  stable: { available: boolean; count: number; generation: VisualGeneration | null };
+  previewLegacy: { available: boolean; count: number; sourceCount: number | null; limit: number | null; coverage: VisualCoverage | null; qualityWarning: string | null };
+  previewCurrent: { available: boolean; count: number; sourceCount: number | null; limit: number | null; coverage: VisualCoverage | null; qualityWarning: string | null };
+}
+
+export interface VisualCoverage { siglip2: number; dinov2: number; dinov3: number }
 
 export interface RankingConfig {
   version: 2;

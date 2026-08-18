@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
-import { facetKeys, FiltersSchema, SearchRequestSchema, type FacetKey, type GroupDetail, type ProductDocument, type RankingConfig, type SearchFilters, type SearchResponse, type VisualModel, type VisualModelStatus } from "@samplehub/contracts";
+import { facetKeys, FiltersSchema, SearchRequestSchema, type FacetKey, type GroupDetail, type IndexScope, type IndexScopeStatus, type ProductDocument, type RankingConfig, type SearchFilters, type SearchResponse, type VisualGeneration, type VisualModel, type VisualModelStatus } from "@samplehub/contracts";
 import { getConfig } from "../common/config";
 import { StateService } from "../state/state.service";
 import { interpretQuery, interpretedFields, type AttributeVocabulary, type DerivedFilterGroup, type QueryInterpretation } from "./query-interpreter";
@@ -20,8 +20,8 @@ const FACET_FIELD: Record<FacetKey, string> = {
 @Injectable()
 export class SearchService {
   private readonly config = getConfig();
-  private schemaCache: { v2: boolean; dinov2: boolean; dinov3: boolean; expiresAt: number } | null = null;
-  private vocabularyCache: { value: AttributeVocabulary; expiresAt: number } | null = null;
+  private schemaCache = new Map<string, { v2: boolean; generation: VisualGeneration; siglip2: boolean; dinov2: boolean; dinov3: boolean; expiresAt: number }>();
+  private vocabularyCache = new Map<string, { value: AttributeVocabulary; expiresAt: number }>();
   constructor(private readonly state: StateService) {}
 
   private async meili(path: string, body?: unknown): Promise<any> {
@@ -35,29 +35,86 @@ export class SearchService {
     return response.json();
   }
 
-  private async indexSchema(): Promise<{ v2: boolean; dinov2: boolean; dinov3: boolean }> {
-    if (this.schemaCache && this.schemaCache.expiresAt > Date.now()) return this.schemaCache;
+  private indexUid(scope = this.state.getIndexScope()): string {
+    return scope === "stable" ? this.config.MEILI_INDEX_UID : `${this.config.MEILI_INDEX_UID}_preview_${scope === "preview_legacy" ? "legacy" : "current"}`;
+  }
+
+  private async indexSchema(uid = this.indexUid()): Promise<{ v2: boolean; generation: VisualGeneration; siglip2: boolean; dinov2: boolean; dinov3: boolean }> {
+    const cached = this.schemaCache.get(uid);
+    if (cached && cached.expiresAt > Date.now()) return cached;
     try {
-      const settings = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/settings`);
+      const settings = await this.meili(`/indexes/${uid}/settings`);
       const v2 = Boolean(settings.embedders?.e5_text);
-      const dinov2 = Boolean(settings.embedders?.dinov2_image);
-      const dinov3 = Boolean(settings.embedders?.dinov3_image);
-      this.schemaCache = { v2, dinov2, dinov3, expiresAt: Date.now() + 5000 };
-      return { v2, dinov2, dinov3 };
+      const generation: VisualGeneration = settings.embedders?.siglip_image_v2 ? "current" : "legacy";
+      const suffix = generation === "current" ? "_v2" : "";
+      const value = {
+        v2,
+        generation,
+        siglip2: Boolean(settings.embedders?.[`siglip_image${suffix}`]),
+        dinov2: Boolean(settings.embedders?.[`dinov2_image${suffix}`]),
+        dinov3: Boolean(settings.embedders?.[`dinov3_image${suffix}`]),
+        expiresAt: Date.now() + 5000,
+      };
+      this.schemaCache.set(uid, value);
+      return value;
     } catch (error) {
-      if (error instanceof NotFoundException) return { v2: false, dinov2: false, dinov3: false };
+      if (error instanceof NotFoundException) return { v2: false, generation: "legacy", siglip2: false, dinov2: false, dinov3: false };
       throw error;
     }
   }
 
+  private async indexCount(scope: IndexScope): Promise<number | null> {
+    try {
+      const stats = await this.meili(`/indexes/${this.indexUid(scope)}/stats`) as { numberOfDocuments?: number };
+      return Number(stats.numberOfDocuments ?? 0);
+    } catch (error) {
+      if (error instanceof NotFoundException) return null;
+      throw error;
+    }
+  }
+
+  async indexScopeStatus(): Promise<IndexScopeStatus> {
+    const [stable, previewLegacy, previewCurrent] = await Promise.all([
+      this.indexCount("stable"), this.indexCount("preview_legacy"), this.indexCount("preview_current"),
+    ]);
+    const stableGeneration = stable === null ? null : (await this.indexSchema(this.indexUid("stable"))).generation;
+    const metadata = (key: string): { sourceCount?: number; limit?: number; count?: number; coverage?: { siglip2: number; dinov2: number; dinov3: number }; qualityWarning?: string | null } => {
+      const row = this.state.raw().prepare("SELECT value_json FROM settings WHERE key=?").get(key) as { value_json?: string } | undefined;
+      if (!row?.value_json) return {};
+      try { const stored = JSON.parse(row.value_json); return typeof stored === "string" ? JSON.parse(stored) : stored; } catch { return {}; }
+    };
+    const legacyMeta = metadata("preview_legacy_metadata");
+    const currentMeta = metadata("preview_current_metadata");
+    const previewLegacyAvailable = previewLegacy !== null && legacyMeta.count === previewLegacy;
+    const previewCurrentAvailable = previewCurrent !== null && currentMeta.count === previewCurrent;
+    return {
+      active: this.state.getIndexScope(),
+      stable: { available: stable !== null, count: stable ?? 0, generation: stableGeneration },
+      previewLegacy: { available: previewLegacyAvailable, count: previewLegacy ?? 0, sourceCount: legacyMeta.sourceCount ?? null, limit: legacyMeta.limit ?? null, coverage: legacyMeta.coverage ?? null, qualityWarning: legacyMeta.qualityWarning ?? null },
+      previewCurrent: { available: previewCurrentAvailable, count: previewCurrent ?? 0, sourceCount: currentMeta.sourceCount ?? null, limit: currentMeta.limit ?? null, coverage: currentMeta.coverage ?? null, qualityWarning: currentMeta.qualityWarning ?? null },
+    };
+  }
+
+  async setIndexScope(scope: IndexScope): Promise<IndexScopeStatus> {
+    const status = await this.indexScopeStatus();
+    const available = scope === "stable" ? status.stable.available : scope === "preview_legacy" ? status.previewLegacy.available : status.previewCurrent.available;
+    if (!available) throw new ConflictException(`The ${scope.replaceAll("_", " ")} index is not available`);
+    this.state.setIndexScope(scope);
+    this.vocabularyCache.clear();
+    return this.indexScopeStatus();
+  }
+
   async visualModelStatus(): Promise<VisualModelStatus> {
     const stored = this.state.getVisualModelStatus();
-    const schema = await this.indexSchema();
-    const dinov2Ready = stored.dinov2Ready && schema.dinov2;
-    const dinov3Ready = stored.dinov3Ready && schema.dinov3;
-    const active: VisualModel = stored.active === "dinov2" && dinov2Ready ? "dinov2"
-      : stored.active === "dinov3" && dinov3Ready ? "dinov3" : "siglip2";
-    return { ...stored, active, dinov2Ready, dinov3Ready };
+    const scope = this.state.getIndexScope();
+    const schema = await this.indexSchema(this.indexUid(scope));
+    const preview = scope !== "stable";
+    const dinov2Ready = schema.dinov2 && (preview || schema.generation === "legacy" || stored.dinov2Ready);
+    const dinov3Ready = schema.dinov3 && (preview || schema.generation === "legacy" || stored.dinov3Ready);
+    const configured = this.state.getConfiguredVisualModel();
+    const active: VisualModel = configured === "dinov2" && dinov2Ready ? "dinov2"
+      : configured === "dinov3" && dinov3Ready ? "dinov3" : "siglip2";
+    return { ...stored, scope, generation: schema.generation, active, siglip2Ready: schema.siglip2, dinov2Ready, dinov3Ready };
   }
 
   async setVisualModel(model: VisualModel): Promise<VisualModelStatus> {
@@ -68,11 +125,11 @@ export class SearchService {
     return this.visualModelStatus();
   }
 
-  private async embed(path: "text" | "visual-text" | "images", values: string[], model: VisualModel = "siglip2"): Promise<{ vectors: number[][]; milliseconds: number }> {
+  private async embed(path: "text" | "visual-text" | "images", values: string[], model: VisualModel = "siglip2", generation: VisualGeneration = "legacy"): Promise<{ vectors: number[][]; milliseconds: number }> {
     const started = performance.now();
     const response = await fetch(`${this.config.INFERENCE_URL}/v1/embed/${path}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(path === "images" ? { images: values, model, priority: 0 } : { texts: values, ...(path === "text" ? { inputType: "query" } : {}), priority: 0 }),
+      body: JSON.stringify(path === "images" ? { images: values, model, generation, priority: 0 } : { texts: values, generation, ...(path === "text" ? { inputType: "query" } : {}), priority: 0 }),
     });
     if (!response.ok) throw new BadRequestException(`Inference rejected the query: ${(await response.text()).slice(0, 300)}`);
     const payload = await response.json() as { embeddings: number[][] };
@@ -106,20 +163,21 @@ export class SearchService {
     return active.length ? active.map((filter) => `(${filter})`).join(" AND ") : undefined;
   }
 
-  private async attributeVocabulary(): Promise<AttributeVocabulary> {
-    if (this.vocabularyCache && this.vocabularyCache.expiresAt > Date.now()) return this.vocabularyCache.value;
-    const result = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/search`, {
+  private async attributeVocabulary(uid: string): Promise<AttributeVocabulary> {
+    const cached = this.vocabularyCache.get(uid);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const result = await this.meili(`/indexes/${uid}/search`, {
       q: "", limit: 0, facets: interpretedFields.map((field) => FACET_FIELD[field]),
     }) as MeiliResult;
     const value = Object.fromEntries(interpretedFields.map((field) => [field,
       Object.keys(result.facetDistribution?.[FACET_FIELD[field]] ?? {})])) as AttributeVocabulary;
-    this.vocabularyCache = { value, expiresAt: Date.now() + 5 * 60_000 };
+    this.vocabularyCache.set(uid, { value, expiresAt: Date.now() + 5 * 60_000 });
     return value;
   }
 
-  private branch(source: MatchSource, query: string, vector: number[] | undefined, embedder: string | undefined, filter?: string, weight = 1): SearchBranch {
+  private branch(source: MatchSource, query: string, vector: number[] | undefined, embedder: string | undefined, filter?: string, weight = 1, indexUid = this.indexUid()): SearchBranch {
     return { source, weight, tier: "standard", query: {
-      indexUid: this.config.MEILI_INDEX_UID,
+      indexUid,
       q: query,
       ...(vector ? { vector } : {}),
       ...(embedder ? { hybrid: { embedder, semanticRatio: 1 } } : {}),
@@ -132,8 +190,11 @@ export class SearchService {
     const request = SearchRequestSchema.parse({ ...input, filters: typeof input.filters === "string" ? JSON.parse(input.filters) : input.filters, hasImage: Boolean(image) });
     const started = performance.now();
     const explicitFilters = FiltersSchema.parse(request.filters);
-    const schema = await this.indexSchema();
+    const scope = this.state.getIndexScope();
+    const indexUid = this.indexUid(scope);
+    const schema = await this.indexSchema(indexUid);
     const v2 = schema.v2;
+    const generation = schema.generation;
     const visualModel = (await this.visualModelStatus()).active;
     if (visualModel !== "siglip2" && request.mode === "text_visual") throw new BadRequestException("Text Visual mode requires SigLIP 2; switch the active visual model in Admin");
     if (!v2 && (explicitFilters.origin?.length || explicitFilters.effect?.length)) {
@@ -145,12 +206,12 @@ export class SearchService {
     const needsSemantic = Boolean(query) && ["auto", "text_semantic", "text_hybrid"].includes(request.mode);
     const needsVisualText = visualModel === "siglip2" && Boolean(query) && (["auto", "text_visual"].includes(request.mode) || (!v2 && needsSemantic));
     const [semanticEmbedding, visualTextEmbedding, imageEmbedding] = await Promise.all([
-      needsSemantic && v2 ? this.embed("text", [query]) : Promise.resolve(undefined),
-      needsVisualText ? this.embed("visual-text", [query]) : Promise.resolve(undefined),
-      image ? this.embed("images", [image.buffer.toString("base64")], visualModel) : Promise.resolve(undefined),
+      needsSemantic && v2 ? this.embed("text", [query], "siglip2", generation) : Promise.resolve(undefined),
+      needsVisualText ? this.embed("visual-text", [query], "siglip2", generation) : Promise.resolve(undefined),
+      image ? this.embed("images", [image.buffer.toString("base64")], visualModel, generation) : Promise.resolve(undefined),
     ]);
     const interpretation: QueryInterpretation = request.mode === "auto" && Boolean(query)
-      ? interpretQuery(query, await this.attributeVocabulary())
+      ? interpretQuery(query, await this.attributeVocabulary(indexUid))
       : { lexicalQuery: query, derivedFilterGroups: [], derivedFilters: {} };
     if (!v2) {
       delete interpretation.derivedFilters.origin;
@@ -165,15 +226,15 @@ export class SearchService {
       visualText: visualTextEmbedding?.vectors[0],
       image: imageEmbedding?.vectors[0],
     };
-    let branches = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, preferredFilter, ranking, v2, visualModel);
+    let branches = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, preferredFilter, ranking, v2, visualModel, generation, indexUid);
     if (hasDerived) {
       const preferred = branches.map((branch) => ({ ...branch, tier: "preferred" as const, weight: branch.weight * 0.85 }));
-      const fallback = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, explicitFilter, ranking, v2, visualModel)
+      const fallback = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, explicitFilter, ranking, v2, visualModel, generation, indexUid)
         .map((branch) => ({ ...branch, tier: "fallback" as const, weight: branch.weight * 0.15 }));
       branches = [...preferred, ...fallback];
     }
     if (!branches.length) throw new BadRequestException("The selected mode is incompatible with the supplied query");
-    const offset = this.decodeCursor(request.cursor, visualModel);
+    const offset = this.decodeCursor(request.cursor, visualModel, generation, indexUid);
     const activeFacetKeys = v2 ? facetKeys : facetKeys.filter((key) => key !== "origin" && key !== "effect");
     const ranked = await this.executeBranches(branches, request.limit, offset);
     const facetResult = await this.loadFacets(branches[0]!.query, activeFacetKeys);
@@ -185,7 +246,7 @@ export class SearchService {
         const values = facetResult.facetDistribution?.[FACET_FIELD[key]] ?? {};
         return { key, values: Object.entries(values).map(([value, count]) => ({ value, count })), enabled: Object.keys(values).length > 0 };
       }),
-      nextCursor: hits.length === request.limit ? this.encodeCursor(offset + hits.length, visualModel) : null,
+      nextCursor: hits.length === request.limit ? this.encodeCursor(offset + hits.length, visualModel, generation, indexUid) : null,
       estimatedProductHits: facetResult.estimatedTotalHits ?? ranked.estimatedTotalHits ?? hits.length,
       processingTimeMs: performance.now() - started,
       timing: { inference: (semanticEmbedding?.milliseconds ?? 0) + (visualTextEmbedding?.milliseconds ?? 0) + (imageEmbedding?.milliseconds ?? 0), meilisearch: ranked.processingTimeMs },
@@ -196,8 +257,8 @@ export class SearchService {
   private async executeBranches(branches: readonly SearchBranch[], limit: number, offset: number): Promise<{ hits: RankedHit[]; estimatedTotalHits?: number; processingTimeMs: number }> {
     if (branches.length === 1) {
       const branch = branches[0]!;
-      const { indexUid: _, ...query } = branch.query;
-      const result = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/search`, {
+      const { indexUid, ...query } = branch.query;
+      const result = await this.meili(`/indexes/${String(indexUid)}/search`, {
         ...query, distinct: "groupId", limit, offset,
       }) as MeiliResult;
       return { hits: result.hits.map((hit) => ({ hit, matchSources: [branch.source], primaryMatchSource: branch.source })),
@@ -205,8 +266,8 @@ export class SearchService {
     }
     const candidateLimit = Math.min(1000, Math.max(200, offset + limit * 4));
     const results = await Promise.all(branches.map(async (branch) => {
-      const { indexUid: _, ...query } = branch.query;
-      const result = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/search`, {
+      const { indexUid, ...query } = branch.query;
+      const result = await this.meili(`/indexes/${String(indexUid)}/search`, {
         ...query, distinct: "groupId", limit: candidateLimit, offset: 0,
       }) as MeiliResult;
       return { branch, result };
@@ -231,47 +292,49 @@ export class SearchService {
     };
   }
 
-  private buildBranches(mode: string, query: string, vectors: { semantic?: number[]; visualText?: number[]; image?: number[] }, filter: string | undefined, ranking: RankingConfig, v2: boolean, visualModel: VisualModel = "siglip2"): SearchBranch[] {
+  private buildBranches(mode: string, query: string, vectors: { semantic?: number[]; visualText?: number[]; image?: number[] }, filter: string | undefined, ranking: RankingConfig, v2: boolean, visualModel: VisualModel = "siglip2", generation: VisualGeneration = "legacy", indexUid = this.config.MEILI_INDEX_UID): SearchBranch[] {
     const semanticEmbedder = v2 ? "e5_text" : "siglip_text";
-    const imageEmbedder = visualModel === "dinov2" ? "dinov2_image"
-      : visualModel === "dinov3" ? "dinov3_image" : "siglip_image";
-    if (mode === "keyword") return query ? [this.branch("keyword", query, undefined, undefined, filter)] : [];
-    if (mode === "text_semantic") return vectors.semantic ? [this.branch("semantic", "", vectors.semantic, semanticEmbedder, filter)] : [];
+    const suffix = generation === "current" ? "_v2" : "";
+    const imageEmbedder = `${visualModel === "siglip2" ? "siglip" : visualModel}_image${suffix}`;
+    const siglipEmbedder = `siglip_image${suffix}`;
+    const branch = (source: MatchSource, text: string, vector?: number[], embedder?: string, branchFilter = filter, weight = 1) => this.branch(source, text, vector, embedder, branchFilter, weight, indexUid);
+    if (mode === "keyword") return query ? [branch("keyword", query)] : [];
+    if (mode === "text_semantic") return vectors.semantic ? [branch("semantic", "", vectors.semantic, semanticEmbedder)] : [];
     if (mode === "text_hybrid") return [
-      ...(query ? [this.branch("keyword", query, undefined, undefined, filter, ranking.textKeywordWeight)] : []),
-      ...(vectors.semantic ? [this.branch("semantic", "", vectors.semantic, semanticEmbedder, filter, ranking.textSemanticWeight)] : []),
+      ...(query ? [branch("keyword", query, undefined, undefined, filter, ranking.textKeywordWeight)] : []),
+      ...(vectors.semantic ? [branch("semantic", "", vectors.semantic, semanticEmbedder, filter, ranking.textSemanticWeight)] : []),
     ];
-    if (mode === "text_visual") return vectors.visualText ? [this.branch("visual_text", "", vectors.visualText, "siglip_image", filter)] : [];
-    if (mode === "image_visual") return vectors.image ? [this.branch("image", "", vectors.image, imageEmbedder, filter)] : [];
-    if (vectors.image && !query) return [this.branch("image", "", vectors.image, imageEmbedder, filter)];
+    if (mode === "text_visual") return vectors.visualText ? [branch("visual_text", "", vectors.visualText, siglipEmbedder)] : [];
+    if (mode === "image_visual") return vectors.image ? [branch("image", "", vectors.image, imageEmbedder)] : [];
+    if (vectors.image && !query) return [branch("image", "", vectors.image, imageEmbedder)];
     if (vectors.image && query) return [
-      this.branch("keyword", query, undefined, undefined, filter, ranking.combinedKeywordWeight),
-      ...(vectors.semantic ? [this.branch("semantic", "", vectors.semantic, semanticEmbedder, filter, ranking.combinedSemanticWeight)] : []),
-      ...(vectors.visualText ? [this.branch("visual_text", "", vectors.visualText, "siglip_image", filter, ranking.combinedVisualTextWeight)] : []),
-      this.branch("image", "", vectors.image, imageEmbedder, filter, ranking.combinedImageWeight),
+      branch("keyword", query, undefined, undefined, filter, ranking.combinedKeywordWeight),
+      ...(vectors.semantic ? [branch("semantic", "", vectors.semantic, semanticEmbedder, filter, ranking.combinedSemanticWeight)] : []),
+      ...(vectors.visualText ? [branch("visual_text", "", vectors.visualText, siglipEmbedder, filter, ranking.combinedVisualTextWeight)] : []),
+      branch("image", "", vectors.image, imageEmbedder, filter, ranking.combinedImageWeight),
     ];
     return [
-      ...(query ? [this.branch("keyword", query, undefined, undefined, filter, ranking.textKeywordWeight)] : []),
-      ...(vectors.semantic ? [this.branch("semantic", "", vectors.semantic, semanticEmbedder, filter, ranking.textSemanticWeight)] : []),
-      ...(vectors.visualText ? [this.branch("visual_text", "", vectors.visualText, "siglip_image", filter, ranking.textVisualWeight)] : []),
+      ...(query ? [branch("keyword", query, undefined, undefined, filter, ranking.textKeywordWeight)] : []),
+      ...(vectors.semantic ? [branch("semantic", "", vectors.semantic, semanticEmbedder, filter, ranking.textSemanticWeight)] : []),
+      ...(vectors.visualText ? [branch("visual_text", "", vectors.visualText, siglipEmbedder, filter, ranking.textVisualWeight)] : []),
     ];
   }
 
   private async loadFacets(base: Record<string, unknown>, activeFacetKeys: readonly FacetKey[]): Promise<MeiliResult> {
-    const { indexUid: _, ...query } = base;
-    return this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/search`, { ...query,
+    const { indexUid, ...query } = base;
+    return this.meili(`/indexes/${String(indexUid)}/search`, { ...query,
       distinct: undefined, facets: activeFacetKeys.map((key) => FACET_FIELD[key]), limit: 0, offset: 0 });
   }
 
   async product(id: string): Promise<ProductDocument> {
-    const document = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/documents/${encodeURIComponent(id)}`);
+    const document = await this.meili(`/indexes/${this.indexUid()}/documents/${encodeURIComponent(id)}`);
     return this.cleanHit(document as MeiliHit);
   }
 
   async group(groupId: string): Promise<GroupDetail> {
     const products: ProductDocument[] = [];
     for (let offset = 0; offset < 10_000; offset += 1000) {
-      const page = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/search`, { q: "", filter: `groupId = ${JSON.stringify(groupId)}`, limit: 1000, offset });
+      const page = await this.meili(`/indexes/${this.indexUid()}/search`, { q: "", filter: `groupId = ${JSON.stringify(groupId)}`, limit: 1000, offset });
       products.push(...(page.hits as MeiliHit[]).map((hit) => this.cleanHit(hit)));
       if (page.hits.length < 1000) break;
     }
@@ -298,17 +361,17 @@ export class SearchService {
   }
 
   private cleanHit(hit: MeiliHit): ProductDocument {
-    const { _rankingScore: _, _federation: __, ...document } = hit;
+    const { _rankingScore: _, _federation: __, _visualEmbeddingState: ___, ...document } = hit as MeiliHit & { _visualEmbeddingState?: unknown };
     return document;
   }
-  private encodeCursor(offset: number, visualModel: VisualModel): string { return Buffer.from(JSON.stringify({ v: 2, offset, visualModel }), "utf8").toString("base64url"); }
-  private decodeCursor(cursor: string | undefined, visualModel: VisualModel): number {
+  private encodeCursor(offset: number, visualModel: VisualModel, generation: VisualGeneration, indexUid: string): string { return Buffer.from(JSON.stringify({ v: 3, offset, visualModel, generation, indexUid }), "utf8").toString("base64url"); }
+  private decodeCursor(cursor: string | undefined, visualModel: VisualModel, generation: VisualGeneration, indexUid: string): number {
     if (!cursor) return 0;
     try {
       const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-      if (value.v !== 2 || !Number.isSafeInteger(value.offset) || value.offset < 0) throw new Error();
-      if (value.visualModel !== visualModel) {
-        throw new BadRequestException("The active visual model changed; run the search again instead of reusing this cursor");
+      if (value.v !== 3 || !Number.isSafeInteger(value.offset) || value.offset < 0) throw new Error();
+      if (value.visualModel !== visualModel || value.generation !== generation || value.indexUid !== indexUid) {
+        throw new BadRequestException("The active visual model or index scope changed; run the search again instead of reusing this cursor");
       }
       return value.offset;
     } catch (error) {

@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, UploadedFile, UseInterceptors } from "@nestjs/common";
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, NotFoundException, Param, Patch, Post, UploadedFile, UseInterceptors } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { Queue } from "bullmq";
@@ -12,6 +12,7 @@ import { StateService } from "../state/state.service";
 import { SearchService } from "../search/search.service";
 import { SetVisualModelDto } from "./dto/set-visual-model.dto";
 import { StartIndexRunDto } from "./dto/start-index-run.dto";
+import { SetIndexScopeDto } from "./dto/set-index-scope.dto";
 
 const RankingSchema = z.object({ version: z.literal(2), textKeywordWeight: z.number().min(0), textSemanticWeight: z.number().min(0), textVisualWeight: z.number().min(0), combinedKeywordWeight: z.number().min(0), combinedSemanticWeight: z.number().min(0), combinedVisualTextWeight: z.number().min(0), combinedImageWeight: z.number().min(0) })
   .refine((value) => value.textKeywordWeight + value.textSemanticWeight + value.textVisualWeight > 0, "At least one text-only weight must be positive")
@@ -35,24 +36,53 @@ export class AdminController {
   setVisualModel(@Body() body: SetVisualModelDto) {
     return this.search.setVisualModel(body.model);
   }
+  @Get("index-scope")
+  indexScope() { return this.search.indexScopeStatus(); }
+  @Patch("index-scope")
+  setIndexScope(@Body() body: SetIndexScopeDto) { return this.search.setIndexScope(body.scope); }
   @Get("index-runs") runs() { return this.state.listIndexRuns(); }
   @Get("index-runs/:id") run(@Param("id") id: string) { return this.state.getIndexRun(id); }
   @Post("index-runs")
-  @ApiOperation({ summary: "Start a catalog index or visual backfill run" })
+  @ApiOperation({ summary: "Start a catalog index or specialized backfill run" })
   @ApiCreatedResponse({ description: "Queued index run" })
   async start(@Body() body: StartIndexRunDto) {
     const mode = body.mode;
     const fingerprint = mode === "visual_backfill" ? getConfig().DINOV2_FINGERPRINT
-      : mode === "dinov3_backfill" ? getConfig().DINOV3_FINGERPRINT : undefined;
-    const run = this.state.createIndexRun(mode, fingerprint);
-    await this.queue.add(mode, { runId: run.id, mode }, { jobId: run.id, attempts: 1, removeOnComplete: 100, removeOnFail: 100 });
+      : mode === "dinov3_backfill" ? getConfig().DINOV3_FINGERPRINT
+        : mode === "caption_backfill" ? getConfig().CAPTION_BACKFILL_FINGERPRINT : undefined;
+    const generation = mode === "limited_full" ? body.generation ?? "current" : mode === "full" ? "current" : undefined;
+    const productLimit = mode === "limited_full" ? body.productLimit ?? 10_000 : undefined;
+    const run = this.state.createIndexRun(mode, fingerprint, { visualGeneration: generation, productLimit });
+    await this.queue.add(mode, { runId: run.id, mode, generation, productLimit }, { jobId: run.id, attempts: 1, removeOnComplete: 100, removeOnFail: 100 });
     return run;
   }
-  @Delete("index-runs/:id") cancel(@Param("id") id: string) { return this.state.requestCancellation(id); }
+  @Delete("index-runs/:id")
+  @ApiOperation({ summary: "Cancel a queued or active index run" })
+  @ApiOkResponse({ description: "Cancellation requested or queued run cancelled" })
+  async cancel(@Param("id") id: string) {
+    const existing = this.state.getIndexRun(id);
+    if (!existing) throw new NotFoundException("Index run not found");
+    if (["completed", "failed", "cancelled"].includes(existing.status)) {
+      throw new ConflictException(`Cannot cancel an index run with status ${existing.status}`);
+    }
+    this.state.requestCancellation(id);
+    const job = await this.queue.getJob(id);
+    if (!job) return existing.status === "queued" ? this.state.markCancelled(id) : this.state.getIndexRun(id);
+    const jobState = await job.getState();
+    if (["unknown", "completed", "failed"].includes(jobState)) return this.state.markCancelled(id);
+    if (["waiting", "delayed", "prioritized", "waiting-children"].includes(jobState)) {
+      try {
+        await job.remove();
+        return this.state.markCancelled(id);
+      } catch {
+        // The worker may have claimed the job between getState() and remove().
+        return this.state.getIndexRun(id);
+      }
+    }
+    return this.state.getIndexRun(id);
+  }
   @Get("index-status") async indexStatus() {
-    const config = getConfig();
-    const response = await fetch(`${config.MEILI_URL}/indexes/${config.MEILI_INDEX_UID}/stats`, { headers: { Authorization: `Bearer ${config.MEILI_MASTER_KEY}` } });
-    return response.ok ? response.json() : { available: false };
+    return this.search.indexScopeStatus();
   }
   @Get("evaluation/queries") evaluationQueries() { return this.state.raw().prepare("SELECT * FROM evaluation_queries ORDER BY created_at DESC").all(); }
   @Post("evaluation/queries") createEvaluationQuery(@Body() body: unknown) {
@@ -78,8 +108,9 @@ export class AdminController {
   @Get("evaluation/runs") evaluationRuns() { return this.state.raw().prepare("SELECT * FROM evaluation_runs ORDER BY created_at DESC LIMIT 50").all(); }
   @Post("evaluation/runs") async createEvaluationRun() {
     const id = randomUUID();
-    const visualModel = (await this.search.visualModelStatus()).active;
-    this.state.raw().prepare("INSERT INTO evaluation_runs(id,config_json,status) VALUES(?,?,'running')").run(id, JSON.stringify({ ranking: this.state.getRanking(), visualModel }));
+    const visualStatus = await this.search.visualModelStatus();
+    const visualModel = visualStatus.active;
+    this.state.raw().prepare("INSERT INTO evaluation_runs(id,config_json,status) VALUES(?,?,'running')").run(id, JSON.stringify({ ranking: this.state.getRanking(), visualModel, generation: visualStatus.generation, indexScope: visualStatus.scope }));
     try {
       const report = await this.evaluate();
       this.state.raw().prepare("UPDATE evaluation_runs SET status='completed',report_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?").run(JSON.stringify(report), id);
@@ -90,7 +121,8 @@ export class AdminController {
     }
   }
   private async evaluate() {
-    const visualModel = (await this.search.visualModelStatus()).active;
+    const visualStatus = await this.search.visualModelStatus();
+    const visualModel = visualStatus.active;
     const queries = this.state.raw().prepare("SELECT * FROM evaluation_queries ORDER BY created_at").all() as Array<Record<string, unknown>>;
     const rows: Array<Record<string, unknown>> = [];
     for (const query of queries) {
@@ -111,7 +143,7 @@ export class AdminController {
       }
     }
     const grouped = new Map<string, number[]>(); for (const row of rows) { const key = `${row.mode}:${row.language}:${row.modality}`; grouped.set(key, [...(grouped.get(key) ?? []), Number(row.ndcgAt10)]); }
-    return { metric: "nDCG@10", generatedAt: new Date().toISOString(), visualModel, queries: rows,
+    return { metric: "nDCG@10", generatedAt: new Date().toISOString(), visualModel, visualGeneration: visualStatus.generation, indexScope: visualStatus.scope, queries: rows,
       aggregates: [...grouped.entries()].map(([key, values]) => ({ slice: key, queryCount: values.length, ndcgAt10: values.reduce((sum, value) => sum + value, 0) / values.length })) };
   }
   private ndcg(actual: number[], ideal: number[]) {

@@ -10,20 +10,24 @@ ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT_ENV, extra="ignore")
 
-    embedding_model_id: str = "google/siglip2-base-patch16-224"
-    embedding_model_revision: str = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
+    embedding_model_id: str = "google/siglip2-base-patch16-naflex"
+    embedding_model_revision: str = "b53b807d3a2d5e2b3911292f2d69e5341cdc064c"
     embedding_dimensions: int = 768
+    siglip_max_num_patches: int = 576
     dinov2_model_id: str = "facebook/dinov2-base"
     dinov2_model_revision: str = "f9e44c814b77203eaa57a6bdbbd535f21ede1415"
     dinov2_dimensions: int = 768
-    dinov3_model_id: str = "facebook/dinov3-vith16plus-pretrain-lvd1689m"
+    dinov2_image_size: int = 392
+    dinov2_pooling: str = "cls_patch_mean"
+    dinov3_model_id: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     dinov3_model_archive: str = (
-        "./temp/dinov3-vith16plus-pretrain-lvd1689m-transformers-default-v1.tar.gz"
+        "./temp/facebookdinov3-vitb16-pretrain-lvd1689m-transformers-default-v1.tar.gz"
     )
-    dinov3_model_dir: str = "./temp/dinov3-vith16plus-pretrain-lvd1689m"
-    dinov3_archive_sha256: str = "57a28916842ed1d39728ae18c0732ffc31a904407c135232a9a15c87cc28b10d"
-    dinov3_dimensions: int = 1280
-    dinov3_image_size: int = 224
+    dinov3_model_dir: str = "./temp/dinov3-vitb16-pretrain-lvd1689m"
+    dinov3_archive_sha256: str = "037a1f688847bedfe533bc1c44b336160d56306c91ad008498c93659dbe85fe0"
+    dinov3_dimensions: int = 768
+    dinov3_image_size: int = 384
+    dinov3_pooling: str = "cls_patch_mean"
     text_embedding_model_id: str = "intfloat/multilingual-e5-base"
     text_embedding_model_revision: str = "d128750597153bb5987e10b1c3493a34e5a4502a"
     text_embedding_dimensions: int = 768
@@ -44,11 +48,32 @@ class Settings(BaseSettings):
     max_image_batch: int = 8
     max_caption_batch: int = 2
 
+    @field_validator("dinov2_image_size")
+    @classmethod
+    def validate_dinov2_image_size(cls, value: int) -> int:
+        if value < 224 or value > 518 or value % 14:
+            raise ValueError("DINOV2_IMAGE_SIZE must be a multiple of 14 between 224 and 518")
+        return value
+
     @field_validator("dinov3_image_size")
     @classmethod
     def validate_dinov3_image_size(cls, value: int) -> int:
         if value < 224 or value > 512 or value % 16:
             raise ValueError("DINOV3_IMAGE_SIZE must be a multiple of 16 between 224 and 512")
+        return value
+
+    @field_validator("dinov2_pooling", "dinov3_pooling")
+    @classmethod
+    def validate_dino_pooling(cls, value: str) -> str:
+        if value not in {"cls", "patch_mean", "cls_patch_mean"}:
+            raise ValueError("DINO pooling must be cls, patch_mean, or cls_patch_mean")
+        return value
+
+    @field_validator("siglip_max_num_patches")
+    @classmethod
+    def validate_siglip_patches(cls, value: int) -> int:
+        if value < 64 or value > 1024:
+            raise ValueError("SIGLIP_MAX_NUM_PATCHES must be between 64 and 1024")
         return value
 
 

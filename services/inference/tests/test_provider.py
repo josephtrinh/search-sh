@@ -17,8 +17,11 @@ from app.provider import (
     Dinov2Provider,
     Dinov3Provider,
     FlorenceProvider,
+    adaptive_catalog_views,
     decode_image,
+    dino_descriptor,
     ensure_dinov3_model,
+    letterbox_square,
     resolve_device,
     text_context_length,
 )
@@ -145,7 +148,7 @@ def test_dinov2_uses_pooler_output_and_l2_normalizes(monkeypatch):
         dinov2_model_revision="pinned-dino",
     )
     provider = Dinov2Provider(settings)
-    result = provider.embed_images([Image.new("RGB", (8, 6))])
+    result = provider.embed_images([Image.new("RGB", (8, 6))], "legacy")
 
     assert result == [[0.6, 0.8]]
     assert calls["normalize"] == ([[3.0, 4.0]], 2, 1)
@@ -237,26 +240,76 @@ def test_dinov3_uses_local_pooler_output_configured_size_and_l2(monkeypatch, tmp
         dinov3_archive_sha256="abc123",
     )
     provider = Dinov3Provider(settings)
-    result = provider.embed_images([Image.new("RGB", (8, 6))])
+    result = provider.embed_images([Image.new("RGB", (8, 6))], "legacy")
 
     assert result == [[5 / 13, 12 / 13]]
     assert calls["model_path"] == tmp_path
     assert calls["model_load"] == {"local_files_only": True, "use_safetensors": True}
     assert calls["processor_load"] == {"local_files_only": True}
-    assert calls["processor"]["size"] == {"height": 320, "width": 320}
+    assert calls["processor"]["size"] == {"height": 224, "width": 224}
     assert calls["normalize"] == ([[5.0, 12.0]], 2, 1)
     assert provider.resolved_revision == "abc123"
 
 
+@pytest.mark.parametrize(
+    ("size", "expected_views"),
+    [((400, 400), 1), ((500, 300), 3), ((900, 200), 5), ((200, 900), 5)],
+)
+def test_adaptive_catalog_views_preserve_whole_image_and_add_square_tiles(size, expected_views):
+    image = Image.new("RGB", size, (10, 20, 30))
+    views = adaptive_catalog_views(image)
+    assert len(views) == expected_views
+    assert views[0].size == size
+    assert all(view.width == view.height for view in views[1:])
+
+
+def test_letterbox_square_preserves_content_aspect_ratio():
+    image = Image.new("RGB", (400, 100), (255, 0, 0))
+    result = letterbox_square(image)
+    assert result.size == (400, 400)
+    assert result.getpixel((200, 200)) == (255, 0, 0)
+    assert result.getpixel((0, 0)) == (124, 116, 104)
+
+
+def test_dino_descriptor_blends_cls_and_patch_mean_and_excludes_registers():
+    class Tensor:
+        def __init__(self, values):
+            self.values = np.asarray(values, dtype=np.float32)
+
+        def __getitem__(self, key):
+            return Tensor(self.values[key])
+
+        def mean(self, dim):
+            return Tensor(self.values.mean(axis=dim))
+
+        def __add__(self, other):
+            return Tensor(self.values + other.values)
+
+        def __mul__(self, value):
+            return Tensor(self.values * value)
+
+    def normalize(tensor, p, dim):
+        del p
+        norms = np.linalg.norm(tensor.values, axis=dim, keepdims=True)
+        return Tensor(tensor.values / norms)
+
+    torch = SimpleNamespace(nn=SimpleNamespace(functional=SimpleNamespace(normalize=normalize)))
+    outputs = SimpleNamespace(
+        last_hidden_state=Tensor([[[1, 0], [100, 0], [100, 0], [100, 0], [100, 0], [0, 1], [0, 1]]])
+    )
+    result = dino_descriptor(torch, outputs, register_tokens=4, pooling="cls_patch_mean")
+    assert result.values.tolist()[0] == pytest.approx([2**-0.5, 2**-0.5])
+
+
 def _make_dinov3_archive(tmp_path: Path, unsafe_name: str | None = None) -> tuple[Path, str]:
     source = tmp_path / "source"
-    model = source / "dinov3-vith16plus-pretrain-lvd1689m"
+    model = source / "facebook" / "dinov3-vitb16-pretrain-lvd1689m"
     model.mkdir(parents=True)
     for name in ("config.json", "preprocessor_config.json", "model.safetensors"):
         (model / name).write_bytes(name.encode())
     archive_path = tmp_path / "model.tar.gz"
     with tarfile.open(archive_path, "w:gz") as archive:
-        archive.add(model, arcname=model.name)
+        archive.add(source / "facebook", arcname="facebook")
         if unsafe_name:
             entry = tarfile.TarInfo(unsafe_name)
             payload = b"unsafe"

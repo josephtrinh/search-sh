@@ -49,6 +49,13 @@ export class CatalogRepository {
     const [rows] = await this.pool.query<RawProduct[]>(`${PRODUCT_SELECT} WHERE ${ELIGIBLE} AND p.id IN (?)`, [ids]);
     return this.hydrate(rows);
   }
+  async deterministicSampleIds(limit: number): Promise<string[]> {
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT p.id FROM products p WHERE ${ELIGIBLE} ORDER BY SHA2(CONCAT('samplehub-visual-preview-v1:', p.id), 256), p.id LIMIT ?`,
+      [limit],
+    );
+    return rows.map((row) => String(row.id));
+  }
   async changedProductIds(productWatermark: string, fileWatermark: string): Promise<{ ids: string[]; productMax: string; fileMax: string }> {
     const [products] = await this.pool.query<RowDataPacket[]>("SELECT id, updated_at FROM products WHERE updated_at > ? ORDER BY updated_at,id", [productWatermark]);
     const [files] = await this.pool.query<RowDataPacket[]>("SELECT product_img_id id, updated_at FROM files WHERE product_img_id IS NOT NULL AND updated_at > ? ORDER BY updated_at,id", [fileWatermark]);

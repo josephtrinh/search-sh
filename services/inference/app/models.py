@@ -19,10 +19,16 @@ class VisualModel(StrEnum):
     dinov3 = "dinov3"
 
 
+class EmbeddingGeneration(StrEnum):
+    legacy = "legacy"
+    current = "current"
+
+
 class TextEmbeddingRequest(BaseModel):
     texts: list[str] = Field(min_length=1, max_length=32)
     inputType: TextInputType = TextInputType.query
     priority: Priority = Priority.interactive
+    generation: EmbeddingGeneration = EmbeddingGeneration.current
 
     @model_validator(mode="after")
     def validate_texts(self) -> "TextEmbeddingRequest":
@@ -35,6 +41,7 @@ class ImageEmbeddingRequest(BaseModel):
     images: list[str] = Field(min_length=1, max_length=8, description="Base64-encoded images")
     model: VisualModel = VisualModel.siglip2
     priority: Priority = Priority.interactive
+    generation: EmbeddingGeneration = EmbeddingGeneration.current
 
 
 class CaptionRequest(BaseModel):
@@ -44,6 +51,16 @@ class CaptionRequest(BaseModel):
 
 class EmbeddingResponse(BaseModel):
     embeddings: list[list[float]]
+    dimensions: int
+    model_id: str
+    model_revision: str
+    device: str
+    queue_wait_ms: float
+    inference_ms: float
+
+
+class CatalogEmbeddingResponse(BaseModel):
+    embedding_sets: list[list[list[float]]]
     dimensions: int
     model_id: str
     model_revision: str

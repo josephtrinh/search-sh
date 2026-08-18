@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import type { IndexRunMode, IndexRunSummary, RankingConfig, VisualModel, VisualModelStatus } from "@samplehub/contracts";
+import type { IndexRunMode, IndexRunSummary, IndexScope, RankingConfig, VisualGeneration, VisualModel, VisualModelStatus } from "@samplehub/contracts";
 import { defaultRankingConfig } from "@samplehub/contracts";
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
@@ -23,7 +23,7 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS index_runs (
-        id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('full','incremental','visual_backfill','dinov3_backfill')), status TEXT NOT NULL,
+        id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('full','limited_full','incremental','visual_backfill','dinov3_backfill','caption_backfill')), status TEXT NOT NULL,
         processed_products INTEGER NOT NULL DEFAULT 0, total_products INTEGER NOT NULL DEFAULT 0,
         embedded_images INTEGER NOT NULL DEFAULT 0, failed_images INTEGER NOT NULL DEFAULT 0,
         siglip_embedded_images INTEGER NOT NULL DEFAULT 0, siglip_failed_images INTEGER NOT NULL DEFAULT 0,
@@ -31,7 +31,12 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
         dinov3_embedded_images INTEGER NOT NULL DEFAULT 0, dinov3_failed_images INTEGER NOT NULL DEFAULT 0,
         captioned_images INTEGER NOT NULL DEFAULT 0, cached_captions INTEGER NOT NULL DEFAULT 0,
         failed_captions INTEGER NOT NULL DEFAULT 0,
-        config_fingerprint TEXT, started_at TEXT, finished_at TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        normalized_images INTEGER NOT NULL DEFAULT 0, rejected_source_images INTEGER NOT NULL DEFAULT 0,
+        visual_eligible_products INTEGER NOT NULL DEFAULT 0,
+        siglip_covered_products INTEGER NOT NULL DEFAULT 0, dinov2_covered_products INTEGER NOT NULL DEFAULT 0,
+        dinov3_covered_products INTEGER NOT NULL DEFAULT 0, visual_coverage_threshold REAL, quality_warning TEXT,
+        config_fingerprint TEXT, visual_generation TEXT, product_limit INTEGER,
+        started_at TEXT, finished_at TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE TABLE IF NOT EXISTS sync_watermarks (stream TEXT PRIMARY KEY, updated_at TEXT NOT NULL, entity_id TEXT NOT NULL, updated_on TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS index_failures (
@@ -68,6 +73,16 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     this.ensureColumn("index_runs", "dinov3_embedded_images", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("index_runs", "dinov3_failed_images", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("index_runs", "config_fingerprint", "TEXT");
+    this.ensureColumn("index_runs", "visual_generation", "TEXT");
+    this.ensureColumn("index_runs", "product_limit", "INTEGER");
+    this.ensureColumn("index_runs", "normalized_images", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("index_runs", "rejected_source_images", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("index_runs", "visual_eligible_products", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("index_runs", "siglip_covered_products", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("index_runs", "dinov2_covered_products", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("index_runs", "dinov3_covered_products", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("index_runs", "visual_coverage_threshold", "REAL");
+    this.ensureColumn("index_runs", "quality_warning", "TEXT");
     this.expandIndexRunModes();
   }
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -76,10 +91,10 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
   }
   private expandIndexRunModes(): void {
     const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='index_runs'").get() as { sql?: string } | undefined;
-    if (row?.sql?.includes("dinov3_backfill")) return;
+    if (row?.sql?.includes("limited_full")) return;
     this.db.transaction(() => {
       this.db.exec(`CREATE TABLE index_runs_next (
-        id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('full','incremental','visual_backfill','dinov3_backfill')), status TEXT NOT NULL,
+        id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('full','limited_full','incremental','visual_backfill','dinov3_backfill','caption_backfill')), status TEXT NOT NULL,
         processed_products INTEGER NOT NULL DEFAULT 0, total_products INTEGER NOT NULL DEFAULT 0,
         embedded_images INTEGER NOT NULL DEFAULT 0, failed_images INTEGER NOT NULL DEFAULT 0,
         siglip_embedded_images INTEGER NOT NULL DEFAULT 0, siglip_failed_images INTEGER NOT NULL DEFAULT 0,
@@ -87,6 +102,11 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
         dinov3_embedded_images INTEGER NOT NULL DEFAULT 0, dinov3_failed_images INTEGER NOT NULL DEFAULT 0,
         captioned_images INTEGER NOT NULL DEFAULT 0, cached_captions INTEGER NOT NULL DEFAULT 0,
         failed_captions INTEGER NOT NULL DEFAULT 0, config_fingerprint TEXT,
+        normalized_images INTEGER NOT NULL DEFAULT 0, rejected_source_images INTEGER NOT NULL DEFAULT 0,
+        visual_eligible_products INTEGER NOT NULL DEFAULT 0,
+        siglip_covered_products INTEGER NOT NULL DEFAULT 0, dinov2_covered_products INTEGER NOT NULL DEFAULT 0,
+        dinov3_covered_products INTEGER NOT NULL DEFAULT 0, visual_coverage_threshold REAL, quality_warning TEXT,
+        visual_generation TEXT, product_limit INTEGER,
         started_at TEXT, finished_at TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )`);
       this.db.exec(`INSERT INTO index_runs_next SELECT
@@ -94,6 +114,8 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
         siglip_embedded_images,siglip_failed_images,dinov2_embedded_images,dinov2_failed_images,
         dinov3_embedded_images,dinov3_failed_images,
         captioned_images,cached_captions,failed_captions,config_fingerprint,
+        normalized_images,rejected_source_images,visual_eligible_products,siglip_covered_products,dinov2_covered_products,dinov3_covered_products,visual_coverage_threshold,quality_warning,
+        visual_generation,product_limit,
         started_at,finished_at,error,created_at FROM index_runs`);
       this.db.exec("DROP TABLE index_runs");
       this.db.exec("ALTER TABLE index_runs_next RENAME TO index_runs");
@@ -109,14 +131,9 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     return this.getRanking();
   }
   getVisualModelStatus(): VisualModelStatus {
-    const activeRow = this.db.prepare("SELECT value_json FROM settings WHERE key='active_visual_model'").get() as { value_json?: string } | undefined;
     const readyRow = this.db.prepare("SELECT value_json FROM settings WHERE key='dinov2_ready_fingerprint'").get() as { value_json?: string } | undefined;
     const dinov3ReadyRow = this.db.prepare("SELECT value_json FROM settings WHERE key='dinov3_ready_fingerprint'").get() as { value_json?: string } | undefined;
-    let configured: VisualModel = "siglip2";
-    try {
-      const value = activeRow?.value_json ? JSON.parse(activeRow.value_json) : "siglip2";
-      if (value === "dinov2" || value === "dinov3") configured = value;
-    } catch {}
+    const configured = this.getConfiguredVisualModel();
     let fingerprint: string | null = null;
     try { fingerprint = readyRow?.value_json ? String(JSON.parse(readyRow.value_json)) : null; } catch {}
     const dinov2Ready = fingerprint === getConfig().DINOV2_FINGERPRINT;
@@ -125,16 +142,40 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     const dinov3Ready = dinov3Fingerprint === getConfig().DINOV3_FINGERPRINT;
     const active: VisualModel = configured === "dinov2" && dinov2Ready ? "dinov2"
       : configured === "dinov3" && dinov3Ready ? "dinov3" : "siglip2";
-    return { active, siglip2Ready: true, dinov2Ready, dinov2Fingerprint: fingerprint, dinov3Ready, dinov3Fingerprint };
+    return { active, generation: this.getStableGeneration(), scope: this.getIndexScope(), siglip2Ready: true, dinov2Ready, dinov2Fingerprint: fingerprint, dinov3Ready, dinov3Fingerprint };
+  }
+  getConfiguredVisualModel(): VisualModel {
+    const row = this.db.prepare("SELECT value_json FROM settings WHERE key='active_visual_model'").get() as { value_json?: string } | undefined;
+    try {
+      const value = row?.value_json ? JSON.parse(row.value_json) : "siglip2";
+      return value === "dinov2" || value === "dinov3" ? value : "siglip2";
+    } catch { return "siglip2"; }
   }
   setVisualModel(model: VisualModel): VisualModelStatus {
     this.db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES('active_visual_model',?,CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP`).run(JSON.stringify(model));
     return this.getVisualModelStatus();
   }
-  createIndexRun(mode: IndexRunMode, configFingerprint?: string): IndexRunSummary {
+  getIndexScope(): IndexScope {
+    const row = this.db.prepare("SELECT value_json FROM settings WHERE key='active_index_scope'").get() as { value_json?: string } | undefined;
+    try {
+      const value = row?.value_json ? JSON.parse(row.value_json) : "stable";
+      return value === "preview_legacy" || value === "preview_current" ? value : "stable";
+    } catch { return "stable"; }
+  }
+  setIndexScope(scope: IndexScope): IndexScope {
+    this.db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES('active_index_scope',?,CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP`).run(JSON.stringify(scope));
+    return this.getIndexScope();
+  }
+  getStableGeneration(): VisualGeneration {
+    const row = this.db.prepare("SELECT value_json FROM settings WHERE key='stable_visual_generation'").get() as { value_json?: string } | undefined;
+    try { return row?.value_json && JSON.parse(row.value_json) === "current" ? "current" : "legacy"; } catch { return "legacy"; }
+  }
+  createIndexRun(mode: IndexRunMode, configFingerprint?: string, options: { visualGeneration?: VisualGeneration; productLimit?: number } = {}): IndexRunSummary {
     const id = randomUUID();
-    this.db.prepare("INSERT INTO index_runs(id,mode,status,config_fingerprint) VALUES(?,?,'queued',?)").run(id, mode, configFingerprint ?? null);
+    this.db.prepare("INSERT INTO index_runs(id,mode,status,config_fingerprint,visual_generation,product_limit) VALUES(?,?,'queued',?,?,?)")
+      .run(id, mode, configFingerprint ?? null, options.visualGeneration ?? null, options.productLimit ?? null);
     return this.getIndexRun(id)!;
   }
   getIndexRun(id: string): IndexRunSummary | null {
@@ -148,14 +189,25 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     this.db.prepare("UPDATE index_runs SET status='cancelling' WHERE id=? AND status IN ('queued','running')").run(id);
     return this.getIndexRun(id);
   }
+  markCancelled(id: string): IndexRunSummary | null {
+    this.db.prepare("UPDATE index_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP,error=COALESCE(error,'Index run cancelled') WHERE id=? AND status IN ('queued','cancelling')").run(id);
+    return this.getIndexRun(id);
+  }
   private mapRun(row: Record<string, unknown>): IndexRunSummary {
     return { id: String(row.id), mode: row.mode as IndexRunMode, status: row.status as IndexRunSummary["status"],
+      visualGeneration: row.visual_generation ? row.visual_generation as VisualGeneration : null,
+      productLimit: row.product_limit === null || row.product_limit === undefined ? null : Number(row.product_limit),
       processedProducts: Number(row.processed_products), totalProducts: Number(row.total_products),
       embeddedImages: Number(row.embedded_images), failedImages: Number(row.failed_images),
       siglipEmbeddedImages: Number(row.siglip_embedded_images), siglipFailedImages: Number(row.siglip_failed_images),
       dinov2EmbeddedImages: Number(row.dinov2_embedded_images), dinov2FailedImages: Number(row.dinov2_failed_images),
       dinov3EmbeddedImages: Number(row.dinov3_embedded_images), dinov3FailedImages: Number(row.dinov3_failed_images),
       captionedImages: Number(row.captioned_images), cachedCaptions: Number(row.cached_captions), failedCaptions: Number(row.failed_captions),
+      normalizedImages: Number(row.normalized_images), rejectedSourceImages: Number(row.rejected_source_images),
+      visualEligibleProducts: Number(row.visual_eligible_products), siglipCoveredProducts: Number(row.siglip_covered_products),
+      dinov2CoveredProducts: Number(row.dinov2_covered_products), dinov3CoveredProducts: Number(row.dinov3_covered_products),
+      visualCoverageThreshold: row.visual_coverage_threshold === null || row.visual_coverage_threshold === undefined ? null : Number(row.visual_coverage_threshold),
+      qualityWarning: row.quality_warning ? String(row.quality_warning) : null,
       startedAt: row.started_at ? String(row.started_at) : null,
       finishedAt: row.finished_at ? String(row.finished_at) : null, error: row.error ? String(row.error) : null };
   }

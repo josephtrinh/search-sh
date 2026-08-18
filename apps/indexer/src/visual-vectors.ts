@@ -1,4 +1,4 @@
-export type VisualEmbedder = "dinov2_image" | "dinov3_image";
+export type VisualEmbedder = "dinov2_image" | "dinov3_image" | "dinov2_image_v2" | "dinov3_image_v2";
 
 export function validVisualVectorSet(
   value: unknown,
@@ -39,4 +39,11 @@ export function mergeVisualVector(
   value: number[][] | null,
 ): Record<string, unknown> {
   return { ...existing, [embedder]: value };
+}
+
+export function mergeTextVector(
+  existing: Record<string, unknown>,
+  value: number[],
+): Record<string, unknown> {
+  return { ...existing, e5_text: value };
 }

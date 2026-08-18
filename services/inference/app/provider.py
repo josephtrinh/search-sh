@@ -15,8 +15,11 @@ from PIL import Image
 
 from app.config import ROOT_ENV, Settings
 
-DINOV3_ARCHIVE_ROOT = "dinov3-vith16plus-pretrain-lvd1689m"
+DINOV3_ARCHIVE_ROOT = PurePosixPath("facebook/dinov3-vitb16-pretrain-lvd1689m")
 DINOV3_REQUIRED_FILES = ("config.json", "preprocessor_config.json", "model.safetensors")
+LEGACY_SIGLIP_MODEL_ID = "google/siglip2-base-patch16-224"
+LEGACY_SIGLIP_REVISION = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
+DINOV_PADDING = (124, 116, 104)
 
 
 def resolve_workspace_path(value: str) -> Path:
@@ -44,7 +47,9 @@ def _safe_archive_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
         name = PurePosixPath(member.name)
         if name.is_absolute() or ".." in name.parts:
             raise RuntimeError(f"DINOv3 archive contains an unsafe path: {member.name}")
-        if not name.parts or name.parts[0] != DINOV3_ARCHIVE_ROOT:
+        is_model_entry = name == DINOV3_ARCHIVE_ROOT or DINOV3_ARCHIVE_ROOT in name.parents
+        is_parent_entry = name in DINOV3_ARCHIVE_ROOT.parents and name != PurePosixPath(".")
+        if not name.parts or not (is_model_entry or is_parent_entry):
             raise RuntimeError(f"DINOv3 archive has an unexpected root: {member.name}")
         if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
             raise RuntimeError(f"DINOv3 archive contains an unsupported entry: {member.name}")
@@ -82,7 +87,7 @@ def ensure_dinov3_model(settings: Settings) -> Path:
         with tarfile.open(archive_path, "r:gz") as archive:
             members = _safe_archive_members(archive)
             archive.extractall(staging, members=members, filter="data")
-        extracted = staging / DINOV3_ARCHIVE_ROOT
+        extracted = staging.joinpath(*DINOV3_ARCHIVE_ROOT.parts)
         _validate_dinov3_directory(extracted)
         try:
             os.replace(extracted, model_path)
@@ -99,6 +104,44 @@ def ensure_dinov3_model(settings: Settings) -> Path:
 def normalize_rows(values: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(values, axis=1, keepdims=True)
     return values / np.maximum(norms, np.finfo(values.dtype).eps)
+
+
+def adaptive_catalog_views(image: Image.Image) -> list[Image.Image]:
+    """Keep the whole frame and add up to four square long-axis tiles."""
+    width, height = image.size
+    short, long = min(width, height), max(width, height)
+    views = [image.copy()]
+    if short <= 0 or long / short <= 1.2:
+        return views
+    tile_count = min(4, max(2, int(np.ceil(long / short))))
+    travel = long - short
+    offsets = [round(index * travel / (tile_count - 1)) for index in range(tile_count)]
+    for offset in dict.fromkeys(offsets):
+        box = (
+            (offset, 0, offset + short, short)
+            if width >= height
+            else (0, offset, short, offset + short)
+        )
+        views.append(image.crop(box))
+    return views
+
+
+def letterbox_square(image: Image.Image) -> Image.Image:
+    side = max(image.size)
+    canvas = Image.new("RGB", (side, side), DINOV_PADDING)
+    canvas.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
+    return canvas
+
+
+def dino_descriptor(torch: Any, outputs: Any, register_tokens: int, pooling: str) -> Any:
+    cls = torch.nn.functional.normalize(outputs.last_hidden_state[:, 0], p=2, dim=1)
+    patches = outputs.last_hidden_state[:, 1 + register_tokens :]
+    patch_mean = torch.nn.functional.normalize(patches.mean(dim=1), p=2, dim=1)
+    if pooling == "cls":
+        return cls
+    if pooling == "patch_mean":
+        return patch_mean
+    return torch.nn.functional.normalize((cls + patch_mean) * 0.5, p=2, dim=1)
 
 
 def text_context_length(model: Any) -> int:
@@ -175,7 +218,10 @@ class DeterministicEmbeddingProvider(ProviderMetadata):
         prefix = f"{input_type}:" if input_type else ""
         return [self._vector(f"{prefix}{text}".encode()) for text in texts]
 
-    def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
+    def embed_images(
+        self, images: list[Image.Image], generation: str = "current"
+    ) -> list[list[float]]:
+        del generation
         return [self._vector(image.tobytes()) for image in images]
 
 
@@ -193,10 +239,13 @@ class DeterministicCaptionProvider(ProviderMetadata):
 
 
 class SiglipProvider(ProviderMetadata):
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, legacy: bool = False):
         self.settings = settings
-        self.model_id = settings.embedding_model_id
-        self.configured_revision = settings.embedding_model_revision
+        self.legacy = legacy
+        self.model_id = LEGACY_SIGLIP_MODEL_ID if legacy else settings.embedding_model_id
+        self.configured_revision = (
+            LEGACY_SIGLIP_REVISION if legacy else settings.embedding_model_revision
+        )
         self.dimensions = settings.embedding_dimensions
         self._torch: Any = None
         self._model: Any = None
@@ -246,9 +295,13 @@ class SiglipProvider(ProviderMetadata):
             embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
         return embeddings.cpu().float().numpy().tolist()
 
-    def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
+    def embed_images(
+        self, images: list[Image.Image], generation: str = "current"
+    ) -> list[list[float]]:
+        del generation
         self._load()
-        inputs = self._processor(images=images, return_tensors="pt").to(self.device)
+        kwargs = {} if self.legacy else {"max_num_patches": self.settings.siglip_max_num_patches}
+        inputs = self._processor(images=images, return_tensors="pt", **kwargs).to(self.device)
         with self._torch.inference_mode():
             embeddings = self._model.get_image_features(**inputs)
             embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
@@ -294,12 +347,28 @@ class Dinov2Provider(ProviderMetadata):
             )
         self.loaded = True
 
-    def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
+    def embed_images(
+        self, images: list[Image.Image], generation: str = "current"
+    ) -> list[list[float]]:
         self._load()
-        inputs = self._processor(images=images, return_tensors="pt").to(self.device)
+        if generation == "legacy":
+            inputs = self._processor(images=images, return_tensors="pt").to(self.device)
+        else:
+            prepared = [letterbox_square(image) for image in images]
+            size = {
+                "height": self.settings.dinov2_image_size,
+                "width": self.settings.dinov2_image_size,
+            }
+            inputs = self._processor(
+                images=prepared, size=size, do_center_crop=False, return_tensors="pt"
+            ).to(self.device)
         with self._torch.inference_mode():
             outputs = self._model(**inputs)
-            embeddings = self._torch.nn.functional.normalize(outputs.pooler_output, p=2, dim=1)
+            embeddings = (
+                self._torch.nn.functional.normalize(outputs.pooler_output, p=2, dim=1)
+                if generation == "legacy"
+                else dino_descriptor(self._torch, outputs, 0, self.settings.dinov2_pooling)
+            )
         return embeddings.cpu().float().numpy().tolist()
 
 
@@ -339,17 +408,54 @@ class Dinov3Provider(ProviderMetadata):
             )
         self.loaded = True
 
-    def embed_images(self, images: list[Image.Image]) -> list[list[float]]:
+    def embed_images(
+        self, images: list[Image.Image], generation: str = "current"
+    ) -> list[list[float]]:
         self._load()
-        size = {
-            "height": self.settings.dinov3_image_size,
-            "width": self.settings.dinov3_image_size,
-        }
-        inputs = self._processor(images=images, size=size, return_tensors="pt").to(self.device)
+        if generation == "legacy":
+            inputs = self._processor(
+                images=images, size={"height": 224, "width": 224}, return_tensors="pt"
+            ).to(self.device)
+        else:
+            prepared = [letterbox_square(image) for image in images]
+            size = {
+                "height": self.settings.dinov3_image_size,
+                "width": self.settings.dinov3_image_size,
+            }
+            inputs = self._processor(
+                images=prepared, size=size, do_center_crop=False, return_tensors="pt"
+            ).to(self.device)
         with self._torch.inference_mode():
             outputs = self._model(**inputs)
-            embeddings = self._torch.nn.functional.normalize(outputs.pooler_output, p=2, dim=1)
+            embeddings = (
+                self._torch.nn.functional.normalize(outputs.pooler_output, p=2, dim=1)
+                if generation == "legacy"
+                else dino_descriptor(
+                    self._torch,
+                    outputs,
+                    int(getattr(self._model.config, "num_register_tokens", 4)),
+                    self.settings.dinov3_pooling,
+                )
+            )
         return embeddings.cpu().float().numpy().tolist()
+
+
+def embed_catalog_images(
+    provider: Any, images: list[Image.Image], generation: str, batch_size: int
+) -> list[list[list[float]]]:
+    view_sets = [
+        [image] if generation == "legacy" else adaptive_catalog_views(image) for image in images
+    ]
+    flat = [view for views in view_sets for view in views]
+    vectors: list[list[float]] = []
+    for offset in range(0, len(flat), batch_size):
+        vectors.extend(provider.embed_images(flat[offset : offset + batch_size], generation))
+    result: list[list[list[float]]] = []
+    cursor = 0
+    for views in view_sets:
+        result.append(vectors[cursor : cursor + len(views)])
+        cursor += len(views)
+    return result
 
 
 class E5Provider(ProviderMetadata):
@@ -479,10 +585,14 @@ def create_providers(
     ProviderMetadata,
     ProviderMetadata,
     ProviderMetadata,
+    ProviderMetadata,
 ]:
     if settings.inference_backend == "deterministic":
         return (
             DeterministicEmbeddingProvider(settings, "siglip", settings.embedding_dimensions),
+            DeterministicEmbeddingProvider(
+                settings, "siglip-legacy", settings.embedding_dimensions
+            ),
             DeterministicEmbeddingProvider(settings, "dinov2", settings.dinov2_dimensions),
             DeterministicEmbeddingProvider(settings, "dinov3", settings.dinov3_dimensions),
             DeterministicEmbeddingProvider(settings, "e5", settings.text_embedding_dimensions),
@@ -490,6 +600,7 @@ def create_providers(
         )
     return (
         SiglipProvider(settings),
+        SiglipProvider(settings, legacy=True),
         Dinov2Provider(settings),
         Dinov3Provider(settings),
         E5Provider(settings),
