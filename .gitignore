@@ -19,5 +19,7 @@ data/meilisearch/
 *.tsbuildinfo
 meili_data/
 redis_data/
+temp/
+data/
 .DS_Store
 *.log
