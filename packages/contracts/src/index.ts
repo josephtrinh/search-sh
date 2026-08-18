@@ -12,7 +12,7 @@ export const rankingModes = [
 export const RankingModeSchema = z.enum(rankingModes);
 export type RankingMode = z.infer<typeof RankingModeSchema>;
 
-export const VisualModelSchema = z.enum(["siglip2", "dinov2"]);
+export const VisualModelSchema = z.enum(["siglip2", "dinov2", "dinov3"]);
 export type VisualModel = z.infer<typeof VisualModelSchema>;
 
 export interface VisualModelStatus {
@@ -20,6 +20,8 @@ export interface VisualModelStatus {
   siglip2Ready: boolean;
   dinov2Ready: boolean;
   dinov2Fingerprint: string | null;
+  dinov3Ready: boolean;
+  dinov3Fingerprint: string | null;
 }
 
 export const facetKeys = [
@@ -43,10 +45,9 @@ export const facetKeys = [
 export type FacetKey = (typeof facetKeys)[number];
 
 export const FiltersSchema = z.object(
-  Object.fromEntries(facetKeys.map((key) => [key, z.array(z.string()).optional()])) as Record<
-    FacetKey,
-    z.ZodOptional<z.ZodArray<z.ZodString>>
-  >,
+  Object.fromEntries(
+    facetKeys.map((key) => [key, z.array(z.string()).optional()]),
+  ) as Record<FacetKey, z.ZodOptional<z.ZodArray<z.ZodString>>>,
 );
 export type SearchFilters = z.infer<typeof FiltersSchema>;
 
@@ -152,13 +153,24 @@ export interface GroupDetail {
   }>;
 }
 
-export const IndexRunModeSchema = z.enum(["full", "incremental", "visual_backfill"]);
+export const IndexRunModeSchema = z.enum([
+  "full",
+  "incremental",
+  "visual_backfill",
+  "dinov3_backfill",
+]);
 export type IndexRunMode = z.infer<typeof IndexRunModeSchema>;
 
 export interface IndexRunSummary {
   id: string;
   mode: IndexRunMode;
-  status: "queued" | "running" | "cancelling" | "cancelled" | "failed" | "completed";
+  status:
+    | "queued"
+    | "running"
+    | "cancelling"
+    | "cancelled"
+    | "failed"
+    | "completed";
   processedProducts: number;
   totalProducts: number;
   embeddedImages: number;
@@ -167,6 +179,8 @@ export interface IndexRunSummary {
   siglipFailedImages: number;
   dinov2EmbeddedImages: number;
   dinov2FailedImages: number;
+  dinov3EmbeddedImages: number;
+  dinov3FailedImages: number;
   captionedImages: number;
   cachedCaptions: number;
   failedCaptions: number;

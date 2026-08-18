@@ -17,7 +17,7 @@ from app.provider import create_providers, decode_image
 from app.scheduler import PriorityScheduler
 
 settings = get_settings()
-siglip, dinov2, e5, florence = create_providers(settings)
+siglip, dinov2, dinov3, e5, florence = create_providers(settings)
 scheduler = PriorityScheduler()
 
 
@@ -50,6 +50,7 @@ async def health() -> HealthResponse:
         models={
             "siglip": model_health(siglip),
             "dinov2": model_health(dinov2),
+            "dinov3": model_health(dinov3),
             "e5": model_health(e5),
             "florence": model_health(florence),
         },
@@ -69,6 +70,11 @@ async def embed_response(provider: Any, priority: int, operation: Any) -> Embedd
     )
 
 
+def request_error(exc: ValueError | RuntimeError) -> HTTPException:
+    status = 422 if isinstance(exc, ValueError) else 503
+    return HTTPException(status_code=status, detail=str(exc))
+
+
 @app.post("/v1/embed/text", response_model=EmbeddingResponse)
 async def embed_text(request: TextEmbeddingRequest) -> EmbeddingResponse:
     try:
@@ -78,7 +84,7 @@ async def embed_text(request: TextEmbeddingRequest) -> EmbeddingResponse:
             lambda: e5.embed_texts(request.texts, request.inputType.value),
         )
     except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise request_error(exc) from exc
 
 
 @app.post("/v1/embed/visual-text", response_model=EmbeddingResponse)
@@ -88,19 +94,20 @@ async def embed_visual_text(request: TextEmbeddingRequest) -> EmbeddingResponse:
             siglip, request.priority, lambda: siglip.embed_texts(request.texts)
         )
     except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise request_error(exc) from exc
 
 
 @app.post("/v1/embed/images", response_model=EmbeddingResponse)
 async def embed_images(request: ImageEmbeddingRequest) -> EmbeddingResponse:
     try:
         images = [decode_image(encoded, settings) for encoded in request.images]
-        provider = dinov2 if request.model.value == "dinov2" else siglip
+        providers = {"siglip2": siglip, "dinov2": dinov2, "dinov3": dinov3}
+        provider = providers[request.model.value]
         return await embed_response(
             provider, request.priority, lambda: provider.embed_images(images)
         )
     except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise request_error(exc) from exc
 
 
 @app.post("/v1/caption/images", response_model=CaptionResponse)
@@ -116,7 +123,7 @@ async def caption_images(request: CaptionRequest) -> CaptionResponse:
             request.priority, lambda: florence.caption_images(images)
         )
     except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise request_error(exc) from exc
     return CaptionResponse(
         captions=captions,
         task=florence.task,

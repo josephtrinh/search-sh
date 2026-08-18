@@ -16,6 +16,7 @@ class TextInputType(StrEnum):
 class VisualModel(StrEnum):
     siglip2 = "siglip2"
     dinov2 = "dinov2"
+    dinov3 = "dinov3"
 
 
 class TextEmbeddingRequest(BaseModel):

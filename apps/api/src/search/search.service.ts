@@ -20,7 +20,7 @@ const FACET_FIELD: Record<FacetKey, string> = {
 @Injectable()
 export class SearchService {
   private readonly config = getConfig();
-  private schemaCache: { v2: boolean; dinov2: boolean; expiresAt: number } | null = null;
+  private schemaCache: { v2: boolean; dinov2: boolean; dinov3: boolean; expiresAt: number } | null = null;
   private vocabularyCache: { value: AttributeVocabulary; expiresAt: number } | null = null;
   constructor(private readonly state: StateService) {}
 
@@ -35,16 +35,17 @@ export class SearchService {
     return response.json();
   }
 
-  private async indexSchema(): Promise<{ v2: boolean; dinov2: boolean }> {
+  private async indexSchema(): Promise<{ v2: boolean; dinov2: boolean; dinov3: boolean }> {
     if (this.schemaCache && this.schemaCache.expiresAt > Date.now()) return this.schemaCache;
     try {
       const settings = await this.meili(`/indexes/${this.config.MEILI_INDEX_UID}/settings`);
       const v2 = Boolean(settings.embedders?.e5_text);
       const dinov2 = Boolean(settings.embedders?.dinov2_image);
-      this.schemaCache = { v2, dinov2, expiresAt: Date.now() + 5000 };
-      return { v2, dinov2 };
+      const dinov3 = Boolean(settings.embedders?.dinov3_image);
+      this.schemaCache = { v2, dinov2, dinov3, expiresAt: Date.now() + 5000 };
+      return { v2, dinov2, dinov3 };
     } catch (error) {
-      if (error instanceof NotFoundException) return { v2: false, dinov2: false };
+      if (error instanceof NotFoundException) return { v2: false, dinov2: false, dinov3: false };
       throw error;
     }
   }
@@ -53,12 +54,16 @@ export class SearchService {
     const stored = this.state.getVisualModelStatus();
     const schema = await this.indexSchema();
     const dinov2Ready = stored.dinov2Ready && schema.dinov2;
-    return { ...stored, active: stored.active === "dinov2" && dinov2Ready ? "dinov2" : "siglip2", dinov2Ready };
+    const dinov3Ready = stored.dinov3Ready && schema.dinov3;
+    const active: VisualModel = stored.active === "dinov2" && dinov2Ready ? "dinov2"
+      : stored.active === "dinov3" && dinov3Ready ? "dinov3" : "siglip2";
+    return { ...stored, active, dinov2Ready, dinov3Ready };
   }
 
   async setVisualModel(model: VisualModel): Promise<VisualModelStatus> {
     const status = await this.visualModelStatus();
     if (model === "dinov2" && !status.dinov2Ready) throw new ConflictException("DINOv2 is not ready. Complete a successful visual backfill first.");
+    if (model === "dinov3" && !status.dinov3Ready) throw new ConflictException("DINOv3 is not ready. Complete a successful DINOv3 backfill first.");
     this.state.setVisualModel(model);
     return this.visualModelStatus();
   }
@@ -130,7 +135,7 @@ export class SearchService {
     const schema = await this.indexSchema();
     const v2 = schema.v2;
     const visualModel = (await this.visualModelStatus()).active;
-    if (visualModel === "dinov2" && request.mode === "text_visual") throw new BadRequestException("Text Visual mode requires SigLIP 2; switch the active visual model in Admin");
+    if (visualModel !== "siglip2" && request.mode === "text_visual") throw new BadRequestException("Text Visual mode requires SigLIP 2; switch the active visual model in Admin");
     if (!v2 && (explicitFilters.origin?.length || explicitFilters.effect?.length)) {
       throw new BadRequestException("Origin and effect filters require a completed v2 full rebuild");
     }
@@ -228,7 +233,8 @@ export class SearchService {
 
   private buildBranches(mode: string, query: string, vectors: { semantic?: number[]; visualText?: number[]; image?: number[] }, filter: string | undefined, ranking: RankingConfig, v2: boolean, visualModel: VisualModel = "siglip2"): SearchBranch[] {
     const semanticEmbedder = v2 ? "e5_text" : "siglip_text";
-    const imageEmbedder = visualModel === "dinov2" ? "dinov2_image" : "siglip_image";
+    const imageEmbedder = visualModel === "dinov2" ? "dinov2_image"
+      : visualModel === "dinov3" ? "dinov3_image" : "siglip_image";
     if (mode === "keyword") return query ? [this.branch("keyword", query, undefined, undefined, filter)] : [];
     if (mode === "text_semantic") return vectors.semantic ? [this.branch("semantic", "", vectors.semantic, semanticEmbedder, filter)] : [];
     if (mode === "text_hybrid") return [

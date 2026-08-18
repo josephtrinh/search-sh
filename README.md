@@ -1,13 +1,13 @@
 # SampleHub Multimodal Search
 
-A local-first monorepo for grouped SampleHub product search. It combines Meilisearch keyword retrieval, multilingual E5 text semantics, switchable SigLIP 2 or DINOv2 visual retrieval, and Florence 2 image captions without changing the source SampleHub database or object store.
+A local-first monorepo for grouped SampleHub product search. It combines Meilisearch keyword retrieval, multilingual E5 text semantics, switchable SigLIP 2, DINOv2, or DINOv3 visual retrieval, and Florence 2 image captions without changing the source SampleHub database or object store.
 
 ## Workspace
 
 - `apps/web` — Next.js shopper and admin interface
 - `apps/api` — NestJS search and administration API
 - `apps/indexer` — BullMQ catalog indexing worker
-- `services/inference` — FastAPI SigLIP 2, DINOv2, multilingual E5, and Florence 2 service
+- `services/inference` — FastAPI SigLIP 2, DINOv2, DINOv3, multilingual E5, and Florence 2 service
 - `packages/contracts` — shared API schemas and TypeScript types
 - `packages/catalog` — grouping and E5 passage rules
 - `docs` — architecture, operations, and source mapping
@@ -19,7 +19,7 @@ A local-first monorepo for grouped SampleHub product search. It combines Meilise
 - Python 3.11–3.13 and `uv`
 - Docker with Compose
 - read-only SampleHub MySQL and S3 credentials
-- several gigabytes of free model-cache space; 8–10 GB of total free working space is recommended for thumbnail mode
+- at least 15 GB of free model/cache space when using the local DINOv3 ViT-H+ archive
 
 Do not mix Node major versions after installing dependencies. `better-sqlite3` is a native module and must match the active Node ABI.
 
@@ -37,6 +37,14 @@ pnpm infra:up
 ```
 
 Fill `.env` with the read-only source credentials. Keep the Meilisearch key at least 16 characters. If Redis or Meilisearch already occupies a configured port, use that compatible service or update both Compose and `.env` consistently.
+
+DINOv3 is a gated Meta model. After accepting its license, place the downloaded archive at:
+
+```text
+temp/dinov3-vith16plus-pretrain-lvd1689m-transformers-default-v1.tar.gz
+```
+
+The inference service verifies the configured SHA-256 and safely extracts it into the gitignored `temp/dinov3-vith16plus-pretrain-lvd1689m` directory when DINOv3 is first requested. Keep the archive intact for setup on another computer; neither the gated weights nor the extracted directory are committed to the repository.
 
 The shared workspace packages export compiled files from their ignored `dist` directories. `pnpm install` links those packages but does not compile them, and the filtered application `dev` commands below do not build them automatically. Build them before starting an application from a fresh clone.
 
@@ -57,10 +65,11 @@ Start inference:
 pnpm inference:dev
 ```
 
-Models load lazily, so `/health` can be healthy while its `loaded` fields are false. The first matching request downloads the pinned model revision:
+Models load lazily, so `/health` can be healthy while its `loaded` fields are false. The first matching request downloads a pinned remote revision or loads the configured local archive:
 
 - SigLIP 2 for image and text-to-image embeddings
 - DINOv2 Base for the optional image-only visual retrieval experiment
+- the local DINOv3 ViT-H+/16 archive for the optional 1,280-dimensional image-only experiment
 - multilingual E5 Base for query and product-passage embeddings
 - Florence 2 Base FT for generated detailed captions
 
@@ -98,11 +107,11 @@ Browser API requests use the web server's same-origin `/api` proxy, so the API, 
 
 Local development intentionally has no authentication. Anyone who can reach the web server can also access the evaluator and indexing controls, so use LAN access only on a trusted network and never forward the configured web port to the internet.
 
-Auto text search extracts populated catalog attributes from the live facet vocabulary, applies cross-field material/effect families as preferred constraints, and uses weighted reciprocal-rank fusion. With SigLIP active it combines keyword, E5, and SigLIP text-to-image retrieval. With DINOv2 active, text search uses keyword and E5 only because DINOv2 has no text encoder. Empty facets are hidden automatically.
+Auto text search extracts populated catalog attributes from the live facet vocabulary, applies cross-field material/effect families as preferred constraints, and uses weighted reciprocal-rank fusion. With SigLIP active it combines keyword, E5, and SigLIP text-to-image retrieval. With either DINO model active, text search uses keyword and E5 only because DINOv2 and DINOv3 have no text encoder. Empty facets are hidden automatically.
 
 ## Image and caption policy
 
-`IMAGE_EMBEDDING_MODE=thumbnail` embeds the original image selected by `products.thumbnail_id`, falling back to the first ordered original image. `all` embeds every product image in batches of eight. The same selection policy is used for both SigLIP and DINOv2.
+`IMAGE_EMBEDDING_MODE=thumbnail` embeds the original image selected by `products.thumbnail_id`, falling back to the first ordered original image. `all` embeds every product image in batches of eight. The same selection policy is used for SigLIP, DINOv2, and DINOv3.
 
 Florence always captions only that representative thumbnail/fallback image, even in `all` mode. Captions and provenance are cached in local SQLite by image content hash. They are searchable but are not displayed or returned as trusted product copy. Changing image mode, a model revision, a caption task, dimensions, indexed fields, or index settings requires a full rebuild.
 
@@ -129,22 +138,22 @@ The stable index is replaced only after:
 Caption failures are reported separately and do not block the swap; affected products still receive structured E5 embeddings.
 If one image in an inference batch is rejected with HTTP 422, the indexer recursively splits that batch and records only the rejected image. Valid images that shared the original batch continue normally.
 
-## Try DINOv2 without replacing SigLIP
+## Try DINOv2 or DINOv3 without replacing existing vectors
 
-The stable index can hold both visual vector sets. SigLIP remains the default, and switching the active model in `/admin` is immediate once DINOv2 is ready. The selection is stored in `data/search-state.sqlite` and applies globally to search and evaluation.
+The stable index can hold all three visual vector sets. SigLIP remains the default, and switching the active model in `/admin` is immediate once the selected DINO model is ready. The selection is stored in `data/search-state.sqlite` and applies globally to search and evaluation.
 
-For an existing v2 index, restart inference, API, and indexer after pulling these changes, then click **Backfill DINOv2** in `/admin`. This is an in-place vector backfill: it keeps the current searchable index, existing documents, E5 vectors, SigLIP vectors, and captions. A new full rebuild is not required. Do not run the backfill against a legacy `siglip_text` index; the UI/API will reject it.
+For an existing v2 index, restart inference, API, and indexer after pulling these changes, then click **Backfill DINOv2** or **Backfill DINOv3** in `/admin`. Each is an independent in-place vector backfill: it keeps the current searchable index, documents, other vector providers, and captions. A full rebuild is not required, and the two DINO backfills may run in either order. Do not run either backfill against a legacy `siglip_text` index; the UI/API will reject it.
 
-The backfill is resumable for the same pinned model fingerprint. On the first run it safely initializes every existing document with `_vectors.dinov2_image: null` before registering the new `userProvided` embedder; Meilisearch requires this opt-out for documents that do not have the new vector yet. It then fetches each document's current `_vectors`, verifies the E5 and SigLIP vectors are present, merges `dinov2_image`, and writes the complete vector map back. The run may remain at 0 processed briefly during this initialization phase. DINOv2 becomes selectable only after all eligible products are processed and at least 95% of selected images succeed. Until then, search continues to use SigLIP.
+Each backfill is resumable for the same model fingerprint. On the first run it safely initializes every existing document with the target embedder set to `null` before registering that `userProvided` embedder; Meilisearch requires this opt-out for documents without the new vector. The worker fetches each document's current `_vectors`, verifies E5 and SigLIP are present, merges only the target DINO vector, and writes the complete vector map back. The run may remain at 0 processed while DINOv3 verifies/extracts its archive, loads the model, and initializes Meilisearch. A model becomes selectable only after all eligible products are visited and at least 95% of selected images succeed.
 
-In DINOv2 mode:
+In either DINO mode:
 
-- image-only search uses DINOv2;
-- combined image plus text search fuses DINOv2 image, E5 semantic, and keyword branches;
+- image-only search uses the selected DINO provider;
+- combined image plus text search fuses that provider's image vector, E5 semantic, and keyword branches;
 - text-only search uses E5 semantic and keyword branches;
-- `text_visual` is disabled because DINOv2 has no compatible text encoder.
+- `text_visual` is disabled because DINOv2 and DINOv3 have no compatible text encoder.
 
-Switch back to **SigLIP 2** in `/admin` at any time; both stored vector sets remain available. Future full and incremental runs maintain both providers after the DINOv2 embedder is present. Changing only the DINOv2 model ID, revision, pooling, or normalization creates a different fingerprint and requires another DINOv2 backfill (or a full rebuild). Changing vector dimensions or `IMAGE_EMBEDDING_MODE` changes index structure/selection and requires a full rebuild.
+Switch among **SigLIP 2**, **DINOv2**, and **DINOv3** in `/admin`; stored vector sets remain available. Full rebuilds create all three. Incremental runs maintain every provider registered on the stable index. Changing DINOv3's archive checksum or `DINOV3_IMAGE_SIZE` creates a new fingerprint and requires another DINOv3 backfill. Changing vector dimensions requires a full rebuild. `DINOV3_IMAGE_SIZE` defaults to 224 and accepts square multiples of 16 from 224 through 512; larger values substantially increase ViT-H+ latency and memory use.
 
 ## Verify and stop
 
@@ -162,7 +171,7 @@ pnpm infra:down
 
 ## Portable MVP data
 
-Compose stores Meilisearch in the host directory `data/meilisearch` so the MVP can be copied between computers. This directory contains the searchable documents, Meilisearch index structures, and the stored E5, SigLIP, and (after backfill) DINOv2 vectors. `data/search-state.sqlite` contains the caption cache, active visual-model selection, DINOv2 readiness fingerprint, and control state, while `data/evaluation` contains local evaluation fixtures.
+Compose stores Meilisearch in the host directory `data/meilisearch` so the MVP can be copied between computers. This directory contains the searchable documents, Meilisearch index structures, and the stored E5, SigLIP, and optional DINOv2/DINOv3 vectors. `data/search-state.sqlite` contains the caption cache, active visual-model selection, independent DINO readiness fingerprints, and control state, while `data/evaluation` contains local evaluation fixtures.
 
 Installations created before the host bind mount may still have their index in the Docker named volume `search-sh_meili_data`. Changing to an empty host directory does not delete that volume, but Meilisearch will start with an empty database because the old volume is no longer mounted. Avoid a full rebuild by copying the named volume before starting the new Compose configuration.
 
@@ -207,7 +216,7 @@ tar -xzf samplehub-mvp-data.tar.gz
 pnpm infra:up
 ```
 
-This archive carries the existing SigLIP and optional DINOv2 image embeddings, E5 embeddings produced from product text plus caption text, active visual-model setting, caption cache, and evaluation state, so it does not require a new full rebuild. It does not contain the Hugging Face model cache or source MySQL/S3 data. Keep `.env` separate and transfer its credentials securely.
+This archive carries the existing SigLIP and optional DINOv2/DINOv3 image embeddings, E5 embeddings produced from product text plus caption text, active visual-model setting, caption cache, and evaluation state, so it does not require a new full rebuild. It does not contain the Hugging Face model cache, the gated DINOv3 archive/extraction, or source MySQL/S3 data. Keep `.env` separate and transfer its credentials securely.
 
 ## Development verification
 

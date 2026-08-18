@@ -23,11 +23,12 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS index_runs (
-        id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('full','incremental','visual_backfill')), status TEXT NOT NULL,
+        id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('full','incremental','visual_backfill','dinov3_backfill')), status TEXT NOT NULL,
         processed_products INTEGER NOT NULL DEFAULT 0, total_products INTEGER NOT NULL DEFAULT 0,
         embedded_images INTEGER NOT NULL DEFAULT 0, failed_images INTEGER NOT NULL DEFAULT 0,
         siglip_embedded_images INTEGER NOT NULL DEFAULT 0, siglip_failed_images INTEGER NOT NULL DEFAULT 0,
         dinov2_embedded_images INTEGER NOT NULL DEFAULT 0, dinov2_failed_images INTEGER NOT NULL DEFAULT 0,
+        dinov3_embedded_images INTEGER NOT NULL DEFAULT 0, dinov3_failed_images INTEGER NOT NULL DEFAULT 0,
         captioned_images INTEGER NOT NULL DEFAULT 0, cached_captions INTEGER NOT NULL DEFAULT 0,
         failed_captions INTEGER NOT NULL DEFAULT 0,
         config_fingerprint TEXT, started_at TEXT, finished_at TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -64,6 +65,8 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     this.ensureColumn("index_runs", "siglip_failed_images", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("index_runs", "dinov2_embedded_images", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("index_runs", "dinov2_failed_images", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("index_runs", "dinov3_embedded_images", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("index_runs", "dinov3_failed_images", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("index_runs", "config_fingerprint", "TEXT");
     this.expandIndexRunModes();
   }
@@ -73,14 +76,15 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
   }
   private expandIndexRunModes(): void {
     const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='index_runs'").get() as { sql?: string } | undefined;
-    if (row?.sql?.includes("visual_backfill")) return;
+    if (row?.sql?.includes("dinov3_backfill")) return;
     this.db.transaction(() => {
       this.db.exec(`CREATE TABLE index_runs_next (
-        id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('full','incremental','visual_backfill')), status TEXT NOT NULL,
+        id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('full','incremental','visual_backfill','dinov3_backfill')), status TEXT NOT NULL,
         processed_products INTEGER NOT NULL DEFAULT 0, total_products INTEGER NOT NULL DEFAULT 0,
         embedded_images INTEGER NOT NULL DEFAULT 0, failed_images INTEGER NOT NULL DEFAULT 0,
         siglip_embedded_images INTEGER NOT NULL DEFAULT 0, siglip_failed_images INTEGER NOT NULL DEFAULT 0,
         dinov2_embedded_images INTEGER NOT NULL DEFAULT 0, dinov2_failed_images INTEGER NOT NULL DEFAULT 0,
+        dinov3_embedded_images INTEGER NOT NULL DEFAULT 0, dinov3_failed_images INTEGER NOT NULL DEFAULT 0,
         captioned_images INTEGER NOT NULL DEFAULT 0, cached_captions INTEGER NOT NULL DEFAULT 0,
         failed_captions INTEGER NOT NULL DEFAULT 0, config_fingerprint TEXT,
         started_at TEXT, finished_at TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -88,6 +92,7 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
       this.db.exec(`INSERT INTO index_runs_next SELECT
         id,mode,status,processed_products,total_products,embedded_images,failed_images,
         siglip_embedded_images,siglip_failed_images,dinov2_embedded_images,dinov2_failed_images,
+        dinov3_embedded_images,dinov3_failed_images,
         captioned_images,cached_captions,failed_captions,config_fingerprint,
         started_at,finished_at,error,created_at FROM index_runs`);
       this.db.exec("DROP TABLE index_runs");
@@ -106,15 +111,21 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
   getVisualModelStatus(): VisualModelStatus {
     const activeRow = this.db.prepare("SELECT value_json FROM settings WHERE key='active_visual_model'").get() as { value_json?: string } | undefined;
     const readyRow = this.db.prepare("SELECT value_json FROM settings WHERE key='dinov2_ready_fingerprint'").get() as { value_json?: string } | undefined;
+    const dinov3ReadyRow = this.db.prepare("SELECT value_json FROM settings WHERE key='dinov3_ready_fingerprint'").get() as { value_json?: string } | undefined;
     let configured: VisualModel = "siglip2";
     try {
       const value = activeRow?.value_json ? JSON.parse(activeRow.value_json) : "siglip2";
-      if (value === "dinov2") configured = value;
+      if (value === "dinov2" || value === "dinov3") configured = value;
     } catch {}
     let fingerprint: string | null = null;
     try { fingerprint = readyRow?.value_json ? String(JSON.parse(readyRow.value_json)) : null; } catch {}
     const dinov2Ready = fingerprint === getConfig().DINOV2_FINGERPRINT;
-    return { active: configured === "dinov2" && dinov2Ready ? "dinov2" : "siglip2", siglip2Ready: true, dinov2Ready, dinov2Fingerprint: fingerprint };
+    let dinov3Fingerprint: string | null = null;
+    try { dinov3Fingerprint = dinov3ReadyRow?.value_json ? String(JSON.parse(dinov3ReadyRow.value_json)) : null; } catch {}
+    const dinov3Ready = dinov3Fingerprint === getConfig().DINOV3_FINGERPRINT;
+    const active: VisualModel = configured === "dinov2" && dinov2Ready ? "dinov2"
+      : configured === "dinov3" && dinov3Ready ? "dinov3" : "siglip2";
+    return { active, siglip2Ready: true, dinov2Ready, dinov2Fingerprint: fingerprint, dinov3Ready, dinov3Fingerprint };
   }
   setVisualModel(model: VisualModel): VisualModelStatus {
     this.db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES('active_visual_model',?,CURRENT_TIMESTAMP)
@@ -143,6 +154,7 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
       embeddedImages: Number(row.embedded_images), failedImages: Number(row.failed_images),
       siglipEmbeddedImages: Number(row.siglip_embedded_images), siglipFailedImages: Number(row.siglip_failed_images),
       dinov2EmbeddedImages: Number(row.dinov2_embedded_images), dinov2FailedImages: Number(row.dinov2_failed_images),
+      dinov3EmbeddedImages: Number(row.dinov3_embedded_images), dinov3FailedImages: Number(row.dinov3_failed_images),
       captionedImages: Number(row.captioned_images), cachedCaptions: Number(row.cached_captions), failedCaptions: Number(row.failed_captions),
       startedAt: row.started_at ? String(row.started_at) : null,
       finishedAt: row.finished_at ? String(row.finished_at) : null, error: row.error ? String(row.error) : null };

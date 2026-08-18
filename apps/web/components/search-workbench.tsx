@@ -80,7 +80,7 @@ export function SearchWorkbench() {
       .then((status) => {
         if (!status) return;
         setVisualModel(status.active);
-        if (status.active === "dinov2")
+        if (status.active !== "siglip2")
           setMode((current) => (current === "text_visual" ? "auto" : current));
       })
       .catch(() => undefined);
@@ -278,7 +278,7 @@ export function SearchWorkbench() {
               "image_visual",
             ].map((value) => {
               const disabled =
-                visualModel === "dinov2" && value === "text_visual";
+                visualModel !== "siglip2" && value === "text_visual";
               return (
                 <button
                   type="button"
@@ -293,7 +293,7 @@ export function SearchWorkbench() {
               );
             })}
             <span className="visual-model-label">
-              Visual: {visualModel === "dinov2" ? "DINOv2" : "SigLIP 2"}
+              Visual: {visualModel === "dinov2" ? "DINOv2" : visualModel === "dinov3" ? "DINOv3" : "SigLIP 2"}
             </span>
           </div>
         </div>

@@ -3,13 +3,14 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { Job } from "bullmq";
-import type { ImageAsset, ProductDocument } from "@samplehub/contracts";
+import type { ImageAsset, IndexRunMode, ProductDocument } from "@samplehub/contracts";
 import { buildEmbeddingText } from "@samplehub/catalog";
 import { runBatchWithIsolation } from "./batch-isolation";
 import { CatalogRepository } from "./catalog";
 import { ImageSource, InferenceClient, isInferenceInputError, MeiliClient } from "./clients";
 import { config } from "./config";
 import { selectEmbeddingImages } from "./image-selection";
+import { mergeVisualVector, validVisualVectorSet, type VisualEmbedder } from "./visual-vectors";
 
 interface AssetWork {
   key: string;
@@ -32,6 +33,20 @@ interface PrepareResult {
   siglipFailed: number;
   dinov2Embedded: number;
   dinov2Failed: number;
+  dinov3Embedded: number;
+  dinov3Failed: number;
+}
+
+interface VisualBackfillTarget {
+  model: "dinov2" | "dinov3";
+  mode: "visual_backfill" | "dinov3_backfill";
+  label: "DINOv2" | "DINOv3";
+  embedder: VisualEmbedder;
+  dimensions: number;
+  fingerprint: string;
+  readySetting: "dinov2_ready_fingerprint" | "dinov3_ready_fingerprint";
+  embeddedColumn: "dinov2_embedded_images" | "dinov3_embedded_images";
+  failedColumn: "dinov2_failed_images" | "dinov3_failed_images";
 }
 
 export class IndexRunner {
@@ -59,13 +74,14 @@ export class IndexRunner {
     this.db.close();
   }
 
-  async run(job: Job<{ runId: string; mode: "full" | "incremental" | "visual_backfill" }>) {
+  async run(job: Job<{ runId: string; mode: IndexRunMode }>) {
     const { runId, mode } = job.data;
     this.update(runId, { status: "running", started_at: new Date().toISOString() });
     try {
       if (mode === "full") await this.full(job);
       else if (mode === "incremental") await this.incremental(job);
-      else await this.visualBackfill(job);
+      else if (mode === "visual_backfill") await this.visualBackfill(job, this.backfillTarget("dinov2"));
+      else await this.visualBackfill(job, this.backfillTarget("dinov3"));
       this.update(runId, { status: "completed", finished_at: new Date().toISOString() });
     } catch (error) {
       const cancelled = this.cancelling(runId);
@@ -97,6 +113,8 @@ export class IndexRunner {
     let failedCaptions = 0;
     let dinov2Embedded = 0;
     let dinov2Failed = 0;
+    let dinov3Embedded = 0;
+    let dinov3Failed = 0;
     for (;;) {
       this.assertActive(runId);
       const products = await this.catalog.batch(after, 20);
@@ -110,6 +128,8 @@ export class IndexRunner {
       failedCaptions += result.failedCaptions;
       dinov2Embedded += result.dinov2Embedded;
       dinov2Failed += result.dinov2Failed;
+      dinov3Embedded += result.dinov3Embedded;
+      dinov3Failed += result.dinov3Failed;
       await this.meili.add(shadow, result.documents);
       processed += products.length;
       after = products.at(-1)!.id;
@@ -124,6 +144,8 @@ export class IndexRunner {
         siglip_failed_images: failed,
         dinov2_embedded_images: dinov2Embedded,
         dinov2_failed_images: dinov2Failed,
+        dinov3_embedded_images: dinov3Embedded,
+        dinov3_failed_images: dinov3Failed,
       });
       await job.updateProgress(Math.round((processed / total) * 100));
     }
@@ -134,6 +156,9 @@ export class IndexRunner {
     if (referenced > 0 && dinov2Embedded / referenced < 0.95) {
       throw new Error(`DINOv2 image success rate ${((dinov2Embedded / referenced) * 100).toFixed(2)}% is below 95%`);
     }
+    if (referenced > 0 && dinov3Embedded / referenced < 0.95) {
+      throw new Error(`DINOv3 image success rate ${((dinov3Embedded / referenced) * 100).toFixed(2)}% is below 95%`);
+    }
     if (await this.meili.count(shadow) !== total) throw new Error("Shadow index document count did not match source");
     await this.meili.smoke(shadow);
     if (!(await this.meili.exists(config.MEILI_INDEX_UID))) await this.meili.create(config.MEILI_INDEX_UID);
@@ -141,6 +166,7 @@ export class IndexRunner {
     await this.meili.smoke(config.MEILI_INDEX_UID);
     await this.meili.deleteIndex(shadow);
     this.setSetting("dinov2_ready_fingerprint", config.DINOV2_FINGERPRINT);
+    this.setSetting("dinov3_ready_fingerprint", config.DINOV3_FINGERPRINT);
     this.setWatermark("products", rebuildStartedAt, "");
     this.setWatermark("files", rebuildStartedAt, "");
   }
@@ -161,7 +187,10 @@ export class IndexRunner {
     let failedCaptions = 0;
     let dinov2Embedded = 0;
     let dinov2Failed = 0;
+    let dinov3Embedded = 0;
+    let dinov3Failed = 0;
     const includeDinov2 = await this.meili.hasEmbedder(config.MEILI_INDEX_UID, "dinov2_image");
+    const includeDinov3 = await this.meili.hasEmbedder(config.MEILI_INDEX_UID, "dinov3_image");
     for (let offset = 0; offset < changes.ids.length; offset += 20) {
       this.assertActive(runId);
       const ids = changes.ids.slice(offset, offset + 20);
@@ -169,7 +198,7 @@ export class IndexRunner {
       const active = new Set(products.map((product) => product.id));
       await this.meili.deleteDocuments(config.MEILI_INDEX_UID, ids.filter((id) => !active.has(id)));
       if (products.length) {
-        const result = await this.prepare(runId, products, includeDinov2);
+        const result = await this.prepare(runId, products, { dinov2: includeDinov2, dinov3: includeDinov3 });
         embedded += result.embedded;
         failed += result.failed;
         captioned += result.captioned;
@@ -177,6 +206,8 @@ export class IndexRunner {
         failedCaptions += result.failedCaptions;
         dinov2Embedded += result.dinov2Embedded;
         dinov2Failed += result.dinov2Failed;
+        dinov3Embedded += result.dinov3Embedded;
+        dinov3Failed += result.dinov3Failed;
         await this.meili.add(config.MEILI_INDEX_UID, result.documents);
       }
       processed += ids.length;
@@ -191,6 +222,8 @@ export class IndexRunner {
         siglip_failed_images: failed,
         dinov2_embedded_images: dinov2Embedded,
         dinov2_failed_images: dinov2Failed,
+        dinov3_embedded_images: dinov3Embedded,
+        dinov3_failed_images: dinov3Failed,
       });
       await job.updateProgress(changes.ids.length ? Math.round((processed / changes.ids.length) * 100) : 100);
     }
@@ -198,19 +231,33 @@ export class IndexRunner {
     this.setWatermark("files", changes.fileMax, "");
   }
 
-  private async visualBackfill(job: Job<{ runId: string }>) {
+  private backfillTarget(model: "dinov2" | "dinov3"): VisualBackfillTarget {
+    return model === "dinov2" ? {
+      model, mode: "visual_backfill", label: "DINOv2", embedder: "dinov2_image",
+      dimensions: config.DINOV2_DIMENSIONS, fingerprint: config.DINOV2_FINGERPRINT,
+      readySetting: "dinov2_ready_fingerprint", embeddedColumn: "dinov2_embedded_images",
+      failedColumn: "dinov2_failed_images",
+    } : {
+      model, mode: "dinov3_backfill", label: "DINOv3", embedder: "dinov3_image",
+      dimensions: config.DINOV3_DIMENSIONS, fingerprint: config.DINOV3_FINGERPRINT,
+      readySetting: "dinov3_ready_fingerprint", embeddedColumn: "dinov3_embedded_images",
+      failedColumn: "dinov3_failed_images",
+    };
+  }
+
+  private async visualBackfill(job: Job<{ runId: string }>, target: VisualBackfillTarget) {
     const runId = job.data.runId;
-    if (!(await this.meili.exists(config.MEILI_INDEX_UID))) throw new Error("Run a full index before backfilling DINOv2");
+    if (!(await this.meili.exists(config.MEILI_INDEX_UID))) throw new Error(`Run a full index before backfilling ${target.label}`);
     if (!(await this.meili.hasEmbedder(config.MEILI_INDEX_UID, "e5_text"))) throw new Error("The stable index uses the legacy vector schema; run a full index first");
     const total = await this.catalog.count();
-    this.update(runId, { total_products: total, config_fingerprint: config.DINOV2_FINGERPRINT });
-    if (!(await this.meili.hasEmbedder(config.MEILI_INDEX_UID, "dinov2_image"))) {
-      await this.seedDinov2OptOuts(job, runId);
+    this.update(runId, { total_products: total, config_fingerprint: target.fingerprint });
+    if (!(await this.meili.hasEmbedder(config.MEILI_INDEX_UID, target.embedder))) {
+      await this.seedVisualOptOuts(job, runId, target);
     }
-    await this.meili.ensureDinov2Embedder(config.MEILI_INDEX_UID);
+    await this.meili.ensureVisualEmbedder(config.MEILI_INDEX_UID, target.model);
     const prior = this.db.prepare(`SELECT 1 FROM index_runs
-      WHERE mode='visual_backfill' AND config_fingerprint=? AND id<>? LIMIT 1`).get(config.DINOV2_FINGERPRINT, runId);
-    const resumeExisting = Boolean(prior) || this.getSetting("dinov2_ready_fingerprint") === config.DINOV2_FINGERPRINT;
+      WHERE mode=? AND config_fingerprint=? AND id<>? LIMIT 1`).get(target.mode, target.fingerprint, runId);
+    const resumeExisting = Boolean(prior) || this.getSetting(target.readySetting) === target.fingerprint;
     let after: string | null = null;
     let processed = 0;
     let referenced = 0;
@@ -224,7 +271,7 @@ export class IndexRunner {
       for (const product of products) {
         const vectors = existing.get(product.id);
         if (!vectors || !("e5_text" in vectors) || !("siglip_image" in vectors)) {
-          throw new Error(`Cannot safely merge DINOv2 vectors for product ${product.id}: existing e5_text or siglip_image vectors were not returned`);
+          throw new Error(`Cannot safely merge ${target.label} vectors for product ${product.id}: existing e5_text or siglip_image vectors were not returned`);
         }
       }
       const imageVectors: number[][][] = products.map(() => []);
@@ -233,8 +280,8 @@ export class IndexRunner {
       products.forEach((product, productIndex) => {
         const assets = selectEmbeddingImages(product, config.IMAGE_EMBEDDING_MODE);
         referenced += assets.length;
-        const current = existing.get(product.id)?.dinov2_image;
-        if (resumeExisting && this.validVectorSet(current, assets.length)) {
+        const current = existing.get(product.id)?.[target.embedder];
+        if (resumeExisting && validVisualVectorSet(current, assets.length, target.dimensions)) {
           skipped.add(productIndex);
           embedded += assets.length;
           return;
@@ -251,7 +298,7 @@ export class IndexRunner {
           if (entry.status === "fulfilled") buffers.set(work.key, entry.value);
           else {
             failed++;
-            this.failure(runId, work.productId, work.asset.id, "dinov2_s3_download", String(entry.reason));
+            this.failure(runId, work.productId, work.asset.id, `${target.model}_s3_download`, String(entry.reason));
           }
         });
       }
@@ -261,7 +308,7 @@ export class IndexRunner {
         const chunk = embeddable.slice(offset, offset + 8);
         const result = await runBatchWithIsolation(
           chunk,
-          (batch) => this.inference.images(batch.map((work) => buffers.get(work.key)!), "dinov2"),
+          (batch) => this.inference.images(batch.map((work) => buffers.get(work.key)!), target.model),
           isInferenceInputError,
         );
         for (const { item: work, value: vector } of result.successes) {
@@ -270,16 +317,17 @@ export class IndexRunner {
         }
         for (const { item: work, error } of result.failures) {
           failed++;
-          this.failure(runId, work.productId, work.asset.id, "dinov2_embedding", String(error));
+          this.failure(runId, work.productId, work.asset.id, `${target.model}_embedding`, String(error));
         }
       }
 
       const updates = products.flatMap((product, productIndex) => skipped.has(productIndex) ? [] : [{
         id: product.id,
-        _vectors: {
-          ...(existing.get(product.id) ?? {}),
-          dinov2_image: imageVectors[productIndex]!.length ? imageVectors[productIndex] : null,
-        },
+        _vectors: mergeVisualVector(
+          existing.get(product.id) ?? {},
+          target.embedder,
+          imageVectors[productIndex]!.length ? imageVectors[productIndex]! : null,
+        ),
       }]);
       await this.meili.updateVectors(config.MEILI_INDEX_UID, updates);
       processed += products.length;
@@ -288,19 +336,19 @@ export class IndexRunner {
         processed_products: processed,
         embedded_images: embedded,
         failed_images: failed,
-        dinov2_embedded_images: embedded,
-        dinov2_failed_images: failed,
+        [target.embeddedColumn]: embedded,
+        [target.failedColumn]: failed,
       });
       await job.updateProgress(Math.round((processed / total) * 100));
     }
     if (processed !== total) throw new Error(`Expected ${total} products but backfilled ${processed}`);
     if (referenced > 0 && embedded / referenced < 0.95) {
-      throw new Error(`DINOv2 image success rate ${((embedded / referenced) * 100).toFixed(2)}% is below 95%`);
+      throw new Error(`${target.label} image success rate ${((embedded / referenced) * 100).toFixed(2)}% is below 95%`);
     }
-    this.setSetting("dinov2_ready_fingerprint", config.DINOV2_FINGERPRINT);
+    this.setSetting(target.readySetting, target.fingerprint);
   }
 
-  private async seedDinov2OptOuts(job: Job<{ runId: string }>, runId: string) {
+  private async seedVisualOptOuts(job: Job<{ runId: string }>, runId: string, target: VisualBackfillTarget) {
     const expected = await this.meili.count(config.MEILI_INDEX_UID);
     let offset = 0;
     for (;;) {
@@ -310,10 +358,10 @@ export class IndexRunner {
       const updates: Array<{ id: string; _vectors: Record<string, unknown> }> = [];
       for (const document of page) {
         if (!("e5_text" in document.vectors) || !("siglip_image" in document.vectors)) {
-          throw new Error(`Cannot safely initialize DINOv2 for product ${document.id}: existing e5_text or siglip_image vectors were not returned`);
+          throw new Error(`Cannot safely initialize ${target.label} for product ${document.id}: existing e5_text or siglip_image vectors were not returned`);
         }
-        if (!Object.prototype.hasOwnProperty.call(document.vectors, "dinov2_image")) {
-          updates.push({ id: document.id, _vectors: { ...document.vectors, dinov2_image: null } });
+        if (!Object.prototype.hasOwnProperty.call(document.vectors, target.embedder)) {
+          updates.push({ id: document.id, _vectors: mergeVisualVector(document.vectors, target.embedder, null) });
         }
       }
       await this.meili.updateVectors(config.MEILI_INDEX_UID, updates);
@@ -323,17 +371,11 @@ export class IndexRunner {
     if (offset !== expected) throw new Error(`Expected to initialize ${expected} Meilisearch documents but visited ${offset}`);
   }
 
-  private validVectorSet(value: unknown, expectedCount: number): boolean {
-    const candidate = value && typeof value === "object" && !Array.isArray(value) && "embeddings" in value
-      ? (value as { embeddings?: unknown }).embeddings : value;
-    if (expectedCount === 0) return candidate === null || (Array.isArray(candidate) && candidate.length === 0);
-    if (!Array.isArray(candidate)) return false;
-    if (candidate.length === config.DINOV2_DIMENSIONS && candidate.every((entry) => typeof entry === "number")) return expectedCount === 1;
-    return candidate.length === expectedCount && candidate.every((vector) => Array.isArray(vector)
-      && vector.length === config.DINOV2_DIMENSIONS && vector.every((entry) => typeof entry === "number"));
-  }
-
-  private async prepare(runId: string, products: ProductDocument[], includeDinov2 = true): Promise<PrepareResult> {
+  private async prepare(
+    runId: string,
+    products: ProductDocument[],
+    visual = { dinov2: true, dinov3: true },
+  ): Promise<PrepareResult> {
     const works = new Map<string, AssetWork>();
     let referenced = 0;
     products.forEach((product, productIndex) => {
@@ -353,6 +395,7 @@ export class IndexRunner {
     const buffers = new Map<string, Buffer>();
     let failed = 0;
     let dinov2Failed = 0;
+    let dinov3Failed = 0;
     const allWorks = [...works.values()];
     for (let offset = 0; offset < allWorks.length; offset += 8) {
       const chunk = allWorks.slice(offset, offset + 8);
@@ -363,7 +406,8 @@ export class IndexRunner {
         else {
           if (work.embed) {
             failed++;
-            if (includeDinov2) dinov2Failed++;
+            if (visual.dinov2) dinov2Failed++;
+            if (visual.dinov3) dinov3Failed++;
           }
           this.failure(runId, work.productId, work.asset.id, "s3_download", String(entry.reason));
         }
@@ -372,6 +416,7 @@ export class IndexRunner {
 
     const siglipImageVectors: number[][][] = products.map(() => []);
     const dinov2ImageVectors: number[][][] = products.map(() => []);
+    const dinov3ImageVectors: number[][][] = products.map(() => []);
     const embeddable = allWorks.filter((work) => work.embed && buffers.has(work.key));
     let embedded = 0;
     for (let offset = 0; offset < embeddable.length; offset += 8) {
@@ -392,7 +437,7 @@ export class IndexRunner {
     }
 
     let dinov2Embedded = 0;
-    if (includeDinov2) {
+    if (visual.dinov2) {
       for (let offset = 0; offset < embeddable.length; offset += 8) {
         const chunk = embeddable.slice(offset, offset + 8);
         const result = await runBatchWithIsolation(
@@ -407,6 +452,26 @@ export class IndexRunner {
         for (const { item: work, error } of result.failures) {
           dinov2Failed++;
           this.failure(runId, work.productId, work.asset.id, "dinov2_embedding", String(error));
+        }
+      }
+    }
+
+    let dinov3Embedded = 0;
+    if (visual.dinov3) {
+      for (let offset = 0; offset < embeddable.length; offset += 8) {
+        const chunk = embeddable.slice(offset, offset + 8);
+        const result = await runBatchWithIsolation(
+          chunk,
+          (batch) => this.inference.images(batch.map((work) => buffers.get(work.key)!), "dinov3"),
+          isInferenceInputError,
+        );
+        for (const { item: work, value: vector } of result.successes) {
+          dinov3ImageVectors[work.productIndex]!.push(vector);
+          dinov3Embedded++;
+        }
+        for (const { item: work, error } of result.failures) {
+          dinov3Failed++;
+          this.failure(runId, work.productId, work.asset.id, "dinov3_embedding", String(error));
         }
       }
     }
@@ -457,12 +522,14 @@ export class IndexRunner {
         e5_text: textVectors[index],
         siglip_image: siglipImageVectors[index],
       };
-      if (includeDinov2) vectors.dinov2_image = dinov2ImageVectors[index];
+      if (visual.dinov2) vectors.dinov2_image = dinov2ImageVectors[index];
+      if (visual.dinov3) vectors.dinov3_image = dinov3ImageVectors[index];
       return { ...product, generatedVisualCaption: captions[index], _vectors: vectors };
     });
     return {
       documents, referenced, embedded, failed, captioned, cached, failedCaptions,
       siglipEmbedded: embedded, siglipFailed: failed, dinov2Embedded, dinov2Failed,
+      dinov3Embedded, dinov3Failed,
     };
   }
 

@@ -1,36 +1,50 @@
 import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, UploadedFile, UseInterceptors } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import { ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { Queue } from "bullmq";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, extname, resolve } from "node:path";
 import { z } from "zod";
-import { IndexRunModeSchema, VisualModelSchema, defaultRankingConfig } from "@samplehub/contracts";
+import { defaultRankingConfig } from "@samplehub/contracts";
 import { getConfig, redisConnection, WORKSPACE_ROOT } from "../common/config";
 import { StateService } from "../state/state.service";
 import { SearchService } from "../search/search.service";
+import { SetVisualModelDto } from "./dto/set-visual-model.dto";
+import { StartIndexRunDto } from "./dto/start-index-run.dto";
 
 const RankingSchema = z.object({ version: z.literal(2), textKeywordWeight: z.number().min(0), textSemanticWeight: z.number().min(0), textVisualWeight: z.number().min(0), combinedKeywordWeight: z.number().min(0), combinedSemanticWeight: z.number().min(0), combinedVisualTextWeight: z.number().min(0), combinedImageWeight: z.number().min(0) })
   .refine((value) => value.textKeywordWeight + value.textSemanticWeight + value.textVisualWeight > 0, "At least one text-only weight must be positive")
   .refine((value) => value.combinedKeywordWeight + value.combinedSemanticWeight + value.combinedVisualTextWeight + value.combinedImageWeight > 0, "At least one combined weight must be positive");
 const EvalQuerySchema = z.object({ label: z.string().min(1).max(200), queryText: z.string().max(500).optional(), language: z.enum(["en", "zh", "mixed"]), modality: z.enum(["text", "image", "combined"]), filters: z.record(z.string(), z.array(z.string())).default({}) });
 
+@ApiTags("admin")
 @Controller("admin")
 export class AdminController {
   private readonly queue = new Queue("catalog-indexing", { connection: redisConnection() });
   constructor(private readonly state: StateService, private readonly search: SearchService) {}
   @Get("ranking") ranking() { return this.state.getRanking(); }
   @Patch("ranking") setRanking(@Body() body: unknown) { return this.state.setRanking(RankingSchema.parse(body)); }
-  @Get("visual-model") visualModel() { return this.search.visualModelStatus(); }
-  @Patch("visual-model") setVisualModel(@Body() body: unknown) {
-    const value = z.object({ model: VisualModelSchema }).parse(body);
-    return this.search.setVisualModel(value.model);
+  @Get("visual-model")
+  @ApiOperation({ summary: "Get the active visual search model and readiness" })
+  @ApiOkResponse({ description: "Visual model status" })
+  visualModel() { return this.search.visualModelStatus(); }
+  @Patch("visual-model")
+  @ApiOperation({ summary: "Select the active visual search model" })
+  @ApiOkResponse({ description: "Updated visual model status" })
+  setVisualModel(@Body() body: SetVisualModelDto) {
+    return this.search.setVisualModel(body.model);
   }
   @Get("index-runs") runs() { return this.state.listIndexRuns(); }
   @Get("index-runs/:id") run(@Param("id") id: string) { return this.state.getIndexRun(id); }
-  @Post("index-runs") async start(@Body() body: { mode?: string }) {
-    const mode = IndexRunModeSchema.parse(body.mode);
-    const run = this.state.createIndexRun(mode, mode === "visual_backfill" ? getConfig().DINOV2_FINGERPRINT : undefined);
+  @Post("index-runs")
+  @ApiOperation({ summary: "Start a catalog index or visual backfill run" })
+  @ApiCreatedResponse({ description: "Queued index run" })
+  async start(@Body() body: StartIndexRunDto) {
+    const mode = body.mode;
+    const fingerprint = mode === "visual_backfill" ? getConfig().DINOV2_FINGERPRINT
+      : mode === "dinov3_backfill" ? getConfig().DINOV3_FINGERPRINT : undefined;
+    const run = this.state.createIndexRun(mode, fingerprint);
     await this.queue.add(mode, { runId: run.id, mode }, { jobId: run.id, attempts: 1, removeOnComplete: 100, removeOnFail: 100 });
     return run;
   }

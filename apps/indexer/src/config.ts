@@ -13,6 +13,9 @@ const Schema = z.object({
   AWS_ACCESS_KEY_ID: z.string(), AWS_SECRET_ACCESS_KEY: z.string(), AWS_REGION: z.string(), AWS_BUCKET_NAME: z.string(), AWS_BUCKET_URL: z.string().url(),
   EMBEDDING_DIMENSIONS: z.coerce.number().int().default(768), EMBEDDING_MODEL_ID: z.string().default("google/siglip2-base-patch16-224"), EMBEDDING_MODEL_REVISION: z.string().default("75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"),
   DINOV2_DIMENSIONS: z.coerce.number().int().default(768), DINOV2_MODEL_ID: z.string().default("facebook/dinov2-base"), DINOV2_MODEL_REVISION: z.string().default("f9e44c814b77203eaa57a6bdbbd535f21ede1415"),
+  DINOV3_DIMENSIONS: z.coerce.number().int().default(1280), DINOV3_MODEL_ID: z.string().default("facebook/dinov3-vith16plus-pretrain-lvd1689m"),
+  DINOV3_ARCHIVE_SHA256: z.string().regex(/^[a-f0-9]{64}$/i).default("57a28916842ed1d39728ae18c0732ffc31a904407c135232a9a15c87cc28b10d"),
+  DINOV3_IMAGE_SIZE: z.coerce.number().int().min(224).max(512).refine((value) => value % 16 === 0, "DINOV3_IMAGE_SIZE must be a multiple of 16").default(224),
   TEXT_EMBEDDING_DIMENSIONS: z.coerce.number().int().default(768), TEXT_EMBEDDING_MODEL_ID: z.string().default("intfloat/multilingual-e5-base"), TEXT_EMBEDDING_MODEL_REVISION: z.string().default("d128750597153bb5987e10b1c3493a34e5a4502a"),
   CAPTION_MODEL_ID: z.string().default("microsoft/Florence-2-base-ft"), CAPTION_MODEL_REVISION: z.string().default("f6c1a25888ffc1d945ee8a1a77ac833c7303d46e"), CAPTION_TASK: z.string().default("<DETAILED_CAPTION>"), MAX_CAPTION_BATCH: z.coerce.number().int().min(1).max(8).default(2),
   IMAGE_EMBEDDING_MODE: z.enum(["thumbnail", "all"]).default("thumbnail"),
@@ -22,5 +25,6 @@ export const config = {
   ...parsed,
   STATE_DATABASE_PATH: isAbsolute(parsed.STATE_DATABASE_PATH) ? parsed.STATE_DATABASE_PATH : resolve(WORKSPACE_ROOT, parsed.STATE_DATABASE_PATH),
   DINOV2_FINGERPRINT: [parsed.DINOV2_MODEL_ID, parsed.DINOV2_MODEL_REVISION, parsed.DINOV2_DIMENSIONS, "pooler_output", "l2", parsed.IMAGE_EMBEDDING_MODE].join(":"),
+  DINOV3_FINGERPRINT: [parsed.DINOV3_MODEL_ID, parsed.DINOV3_ARCHIVE_SHA256, parsed.DINOV3_DIMENSIONS, parsed.DINOV3_IMAGE_SIZE, "pooler_output", "l2", parsed.IMAGE_EMBEDDING_MODE].join(":"),
 };
 export const redis = { host: config.REDIS_HOST, port: config.REDIS_PORT, db: config.REDIS_DB, username: config.REDIS_USERNAME, password: config.REDIS_PASSWORD, maxRetriesPerRequest: null };

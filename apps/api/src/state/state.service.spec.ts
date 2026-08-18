@@ -1,5 +1,6 @@
 import { defaultRankingConfig } from "@samplehub/contracts";
 import Database from "better-sqlite3";
+import { getConfig } from "../common/config";
 import { StateService } from "./state.service";
 
 describe("StateService", () => {
@@ -21,16 +22,22 @@ describe("StateService", () => {
   it("persists index runs and cancellation", () => {
     const run = service.createIndexRun("full"); expect(run.status).toBe("queued");
     expect(run.captionedImages).toBe(0); expect(run.cachedCaptions).toBe(0); expect(run.failedCaptions).toBe(0);
-    expect(run.siglipEmbeddedImages).toBe(0); expect(run.dinov2EmbeddedImages).toBe(0);
+    expect(run.siglipEmbeddedImages).toBe(0); expect(run.dinov2EmbeddedImages).toBe(0); expect(run.dinov3EmbeddedImages).toBe(0);
     expect(service.requestCancellation(run.id)?.status).toBe("cancelling");
   });
   it("migrates legacy runs and accepts visual backfills", () => {
     expect(service.getIndexRun("legacy-run")?.status).toBe("completed");
     expect(service.createIndexRun("visual_backfill", "test-fingerprint").mode).toBe("visual_backfill");
+    expect(service.createIndexRun("dinov3_backfill", "test-dinov3-fingerprint").mode).toBe("dinov3_backfill");
   });
   it("keeps SigLIP active until the current DINOv2 fingerprint is ready", () => {
-    expect(service.getVisualModelStatus()).toMatchObject({ active: "siglip2", dinov2Ready: false });
+    expect(service.getVisualModelStatus()).toMatchObject({ active: "siglip2", dinov2Ready: false, dinov3Ready: false });
     expect(service.setVisualModel("dinov2").active).toBe("siglip2");
+  });
+  it("activates DINOv3 only for the current fingerprint", () => {
+    service.raw().prepare(`INSERT INTO settings(key,value_json) VALUES('dinov3_ready_fingerprint',?)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json`).run(JSON.stringify(getConfig().DINOV3_FINGERPRINT));
+    expect(service.setVisualModel("dinov3")).toMatchObject({ active: "dinov3", dinov3Ready: true });
   });
   it("creates the content-addressed caption cache", () => {
     const table = service.raw().prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='image_caption_cache'").get();

@@ -22,9 +22,13 @@ const ConfigSchema = z.object({
   DINOV2_MODEL_ID: z.string().default("facebook/dinov2-base"),
   DINOV2_MODEL_REVISION: z.string().default("f9e44c814b77203eaa57a6bdbbd535f21ede1415"),
   DINOV2_DIMENSIONS: z.coerce.number().int().positive().default(768),
+  DINOV3_MODEL_ID: z.string().default("facebook/dinov3-vith16plus-pretrain-lvd1689m"),
+  DINOV3_ARCHIVE_SHA256: z.string().regex(/^[a-f0-9]{64}$/i).default("57a28916842ed1d39728ae18c0732ffc31a904407c135232a9a15c87cc28b10d"),
+  DINOV3_DIMENSIONS: z.coerce.number().int().positive().default(1280),
+  DINOV3_IMAGE_SIZE: z.coerce.number().int().min(224).max(512).refine((value) => value % 16 === 0, "DINOV3_IMAGE_SIZE must be a multiple of 16").default(224),
   IMAGE_EMBEDDING_MODE: z.enum(["thumbnail", "all"]).default("thumbnail"),
 });
-export type AppConfig = z.infer<typeof ConfigSchema> & { DINOV2_FINGERPRINT: string };
+export type AppConfig = z.infer<typeof ConfigSchema> & { DINOV2_FINGERPRINT: string; DINOV3_FINGERPRINT: string };
 let cached: AppConfig | undefined;
 export function getConfig(): AppConfig {
   if (!cached) {
@@ -33,6 +37,7 @@ export function getConfig(): AppConfig {
       ...parsed,
       STATE_DATABASE_PATH: isAbsolute(parsed.STATE_DATABASE_PATH) ? parsed.STATE_DATABASE_PATH : resolve(WORKSPACE_ROOT, parsed.STATE_DATABASE_PATH),
       DINOV2_FINGERPRINT: [parsed.DINOV2_MODEL_ID, parsed.DINOV2_MODEL_REVISION, parsed.DINOV2_DIMENSIONS, "pooler_output", "l2", parsed.IMAGE_EMBEDDING_MODE].join(":"),
+      DINOV3_FINGERPRINT: [parsed.DINOV3_MODEL_ID, parsed.DINOV3_ARCHIVE_SHA256, parsed.DINOV3_DIMENSIONS, parsed.DINOV3_IMAGE_SIZE, "pooler_output", "l2", parsed.IMAGE_EMBEDDING_MODE].join(":"),
     };
   }
   return cached;

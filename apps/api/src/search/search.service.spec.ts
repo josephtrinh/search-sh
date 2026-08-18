@@ -29,6 +29,12 @@ describe("SearchService", () => {
       ["keyword", undefined], ["semantic", "e5_text"], ["image", "dinov2_image"],
     ]);
   });
+  it("uses DINOv3 for image search and omits SigLIP visual text", () => {
+    const branches = (service as any).buildBranches("auto", "grey tile", { semantic: [1], image: [3] }, undefined, defaultRankingConfig, true, "dinov3");
+    expect(branches.map((branch: any) => [branch.source, branch.query.hybrid?.embedder])).toEqual([
+      ["keyword", undefined], ["semantic", "e5_text"], ["image", "dinov3_image"],
+    ]);
+  });
   it("combines derived attribute families with OR and independent concepts with AND", () => {
     const expression = (service as any).derivedFilterExpression({}, [
       { canonical: "Red", fields: { color: ["Red"] } },

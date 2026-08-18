@@ -19,7 +19,7 @@ export function isInferenceInputError(error: unknown): boolean {
 export class InferenceClient {
   async textPassages(texts: string[]): Promise<number[][]> { return this.call("embed/text", { texts, inputType: "passage", priority: 10 }); }
   async visualText(texts: string[]): Promise<number[][]> { return this.call("embed/visual-text", { texts, priority: 10 }); }
-  async images(images: Buffer[], model: "siglip2" | "dinov2" = "siglip2"): Promise<number[][]> { return this.call("images", { images: images.map((image) => image.toString("base64")), model, priority: 10 }); }
+  async images(images: Buffer[], model: "siglip2" | "dinov2" | "dinov3" = "siglip2"): Promise<number[][]> { return this.call("images", { images: images.map((image) => image.toString("base64")), model, priority: 10 }); }
   async captions(images: Buffer[]): Promise<string[]> {
     const response = await fetch(`${config.INFERENCE_URL}/v1/caption/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images: images.map((image) => image.toString("base64")), priority: 10 }) });
     if (!response.ok) throw new InferenceHttpError("caption", response.status, (await response.text()).slice(0, 500));
@@ -62,6 +62,7 @@ export class MeiliClient {
         e5_text: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS },
         siglip_image: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS },
         dinov2_image: { source: "userProvided", dimensions: config.DINOV2_DIMENSIONS },
+        dinov3_image: { source: "userProvided", dimensions: config.DINOV3_DIMENSIONS },
       },
     };
     await this.wait((await this.request("PATCH", `/indexes/${uid}/settings`, settings)).taskUid);
@@ -70,18 +71,21 @@ export class MeiliClient {
   async deleteDocuments(uid: string, ids: string[]) { if (ids.length) await this.wait((await this.request("POST", `/indexes/${uid}/documents/delete-batch`, ids)).taskUid); }
   async count(uid: string): Promise<number> { return Number((await this.request("GET", `/indexes/${uid}/stats`)).numberOfDocuments); }
   async hasEmbedder(uid: string, name: string): Promise<boolean> { const settings = await this.request("GET", `/indexes/${uid}/settings`); return Boolean(settings.embedders?.[name]); }
-  async ensureDinov2Embedder(uid: string) {
+  async ensureVisualEmbedder(uid: string, model: "dinov2" | "dinov3") {
     const settings = await this.request("GET", `/indexes/${uid}/settings/embedders`) as Record<string, { dimensions?: number } | undefined>;
-    const current = settings.dinov2_image;
+    const embedder = `${model}_image`;
+    const dimensions = model === "dinov2" ? config.DINOV2_DIMENSIONS : config.DINOV3_DIMENSIONS;
+    const label = model === "dinov2" ? "DINOv2" : "DINOv3";
+    const current = settings[embedder];
     if (current) {
-      if (current.dimensions !== config.DINOV2_DIMENSIONS) {
-        throw new Error(`Existing DINOv2 embedder has ${current.dimensions ?? "unknown"} dimensions; a full rebuild is required for ${config.DINOV2_DIMENSIONS} dimensions`);
+      if (current.dimensions !== dimensions) {
+        throw new Error(`Existing ${label} embedder has ${current.dimensions ?? "unknown"} dimensions; a full rebuild is required for ${dimensions} dimensions`);
       }
       return;
     }
     await this.wait((await this.request("PATCH", `/indexes/${uid}/settings/embedders`, {
       ...settings,
-      dinov2_image: { source: "userProvided", dimensions: config.DINOV2_DIMENSIONS },
+      [embedder]: { source: "userProvided", dimensions },
     })).taskUid);
   }
   async vectors(uid: string, ids: string[]): Promise<Map<string, Record<string, unknown>>> {
