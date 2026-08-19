@@ -1,10 +1,11 @@
 [project]
 name = "samplehub-inference"
 version = "0.1.0"
-description = "Priority-aware local SigLIP 2, DINOv2, DINOv3, multilingual E5, and Florence 2 inference service"
+description = "Priority-aware local SigLIP 2, DINOv2, DINOv3, multilingual E5, Florence 2, and Qwen caption inference service"
 requires-python = ">=3.11,<3.14"
 dependencies = [
   "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
   "numpy>=2.2,<3",
   "pillow>=11.3,<13",
   "pydantic-settings>=2.10,<3",
@@ -22,7 +23,6 @@ model = [
 
 [dependency-groups]
 dev = [
-  "httpx>=0.28,<1",
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<1",

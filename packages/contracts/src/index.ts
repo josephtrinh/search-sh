@@ -21,6 +21,19 @@ export type VisualGeneration = z.infer<typeof VisualGenerationSchema>;
 export const IndexScopeSchema = z.enum(["stable", "preview_legacy", "preview_current"]);
 export type IndexScope = z.infer<typeof IndexScopeSchema>;
 
+export const CaptionProviderSchema = z.enum(["florence", "qwen"]);
+export type CaptionProvider = z.infer<typeof CaptionProviderSchema>;
+
+export interface CaptionProviderStatus {
+  configured: CaptionProvider;
+  active: CaptionProvider;
+  scope: IndexScope;
+  florenceReady: boolean;
+  qwenReady: boolean;
+  florenceFingerprint: string | null;
+  qwenFingerprint: string | null;
+}
+
 export interface VisualModelStatus {
   active: VisualModel;
   generation: VisualGeneration;
@@ -148,6 +161,7 @@ export interface SearchResponse {
   processingTimeMs: number;
   timing: Record<string, number>;
   visualModel: VisualModel;
+  captionProvider: CaptionProvider;
 }
 
 export interface GroupDetail {
@@ -176,6 +190,8 @@ export interface IndexRunSummary {
   mode: IndexRunMode;
   visualGeneration: VisualGeneration | null;
   productLimit: number | null;
+  captionProvider: CaptionProvider | null;
+  targetScope: IndexScope | null;
   status:
     | "queued"
     | "running"

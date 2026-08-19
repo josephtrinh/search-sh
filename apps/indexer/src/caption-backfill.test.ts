@@ -59,7 +59,7 @@ function product(id: string, image?: ImageAsset): ProductDocument {
   };
 }
 
-test("caption backfill updates successful products and preserves failed products and visual vectors", async () => {
+test("caption backfill updates successful products and gives failed products structured-only vectors", async () => {
   const { IndexRunner } = await import("./runner");
   const assets = ["fresh", "cached", "failed"].map((id) => ({
     id: `${id}-image`,
@@ -90,7 +90,6 @@ test("caption backfill updates successful products and preserves failed products
   const runUpdates: Array<Record<string, unknown>> = [];
   const failures: string[] = [];
   const stored: string[] = [];
-  let batch = 0;
   const validImage = await sharp({ create: { width: 2, height: 2, channels: 3, background: "white" } }).png().toBuffer();
 
   interface Harness {
@@ -99,22 +98,21 @@ test("caption backfill updates successful products and preserves failed products
   const runner = Object.create(IndexRunner.prototype) as unknown as Harness &
     Record<string, unknown>;
   Object.assign(runner, {
-    catalog: {
-      count: async () => products.length,
-      batch: async () => (batch++ === 0 ? products : []),
-    },
     meili: {
       exists: async () => true,
       hasEmbedder: async () => true,
-      generation: async () => "legacy",
+      ensureCaptionEmbedder: async () => undefined,
       count: async () => products.length,
-      vectors: async () => vectors,
+      documentPage: async (_uid: string, offset: number) => offset === 0
+        ? products.map((entry) => ({ ...entry, _vectors: vectors.get(entry.id)!.vectors }))
+        : [],
       updateDocuments: async (
         _uid: string,
         documents: Array<Record<string, unknown>>,
       ) => {
         updates.push(...documents);
       },
+      semanticSmoke: async () => undefined,
     },
     imageSource: {
       get: async (url: string) => {
@@ -128,10 +126,12 @@ test("caption backfill updates successful products and preserves failed products
         texts.map((_, index) => [100 + index]),
     },
     cachedCaption: (imageId: string) =>
-      imageId === "cached-image" ? "cached detailed caption" : null,
+      imageId === "cached-image" ? "cached detailed caption" : undefined,
     storeCaption: (imageId: string) => stored.push(imageId),
     failure: (_runId: string, productId: string) => failures.push(productId),
     assertActive: () => undefined,
+    assertCaptionCoverage: async () => undefined,
+    setSetting: () => undefined,
     update: (_runId: string, values: Record<string, unknown>) =>
       runUpdates.push(values),
   });
@@ -147,6 +147,7 @@ test("caption backfill updates successful products and preserves failed products
 
   assert.deepEqual(updates.map((entry) => String(entry.id)).sort(), [
     "cached",
+    "failed",
     "fresh",
     "no-image",
   ]);
@@ -162,10 +163,7 @@ test("caption backfill updates successful products and preserves failed products
     updates.find((entry) => entry.id === "cached")?.generatedVisualCaption,
     "cached detailed caption",
   );
-  assert.equal(
-    updates.some((entry) => entry.id === "failed"),
-    false,
-  );
+  assert.equal(updates.find((entry) => entry.id === "failed")?.generatedVisualCaption, null);
   assert.deepEqual(
     (
       updates.find((entry) => entry.id === "fresh")?._vectors as Record<
@@ -199,4 +197,22 @@ test("caption backfill updates successful products and preserves failed products
   assert.equal(runUpdates.at(-1)?.cached_captions, 1);
   assert.equal(runUpdates.at(-1)?.failed_captions, 1);
   assert.equal(progress.at(-1), 100);
+});
+
+test("caption embedder initialization preserves existing vectors", async () => {
+  const { IndexRunner } = await import("./runner");
+  const updates: Array<Record<string, unknown>> = [];
+  const runner = Object.create(IndexRunner.prototype) as Record<string, unknown> & {
+    seedCaptionOptOuts(job: Job, runId: string, uid: string, embedder: "e5_text_qwen"): Promise<void>;
+  };
+  Object.assign(runner, {
+    meili: {
+      count: async () => 1,
+      vectorPage: async (_uid: string, offset: number) => offset === 0 ? [{ id: "one", vectors: { e5_text: [1], siglip_image_v2: [[2]] } }] : [],
+      updateVectors: async (_uid: string, documents: Array<Record<string, unknown>>) => updates.push(...documents),
+    },
+    assertActive: () => undefined,
+  });
+  await runner.seedCaptionOptOuts({ updateProgress: async () => undefined } as unknown as Job, "run", "products", "e5_text_qwen");
+  assert.deepEqual(updates[0]?._vectors, { e5_text: [1], siglip_image_v2: [[2]], e5_text_qwen: null });
 });

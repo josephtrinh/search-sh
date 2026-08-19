@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import numpy as np
 import pytest
 from PIL import Image
@@ -17,11 +18,13 @@ from app.provider import (
     Dinov2Provider,
     Dinov3Provider,
     FlorenceProvider,
+    QwenCaptionProvider,
     adaptive_catalog_views,
     decode_image,
     dino_descriptor,
     ensure_dinov3_model,
     letterbox_square,
+    normalize_qwen_caption,
     resolve_device,
     text_context_length,
 )
@@ -40,6 +43,49 @@ def test_embeddings_are_deterministic_and_normalized():
     assert first == second
     assert len(first) == 32
     assert np.linalg.norm(first) == pytest.approx(1.0)
+
+
+def test_qwen_caption_normalizer_handles_reasoning_and_no_material():
+    value = '<think>hidden</think> "Warm grey surface with fine speckles."'
+    assert normalize_qwen_caption(value) == "Warm grey surface with fine speckles."
+    assert normalize_qwen_caption("<NO_MATERIAL>") is None
+    with pytest.raises(ValueError, match="malformed"):
+        normalize_qwen_caption('{"caption":"not allowed"}')
+
+
+def test_qwen_caption_retries_malformed_output(monkeypatch):
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            calls.append(1)
+            content = (
+                "- invalid list"
+                if len(calls) == 1
+                else "Cream surface with subtle linear veining."
+            )
+            return {"choices": [{"message": {"content": content}}]}
+
+    monkeypatch.setattr("app.provider.httpx.post", lambda *_args, **_kwargs: Response())
+    provider = QwenCaptionProvider(Settings())
+    assert provider.caption_images([Image.new("RGB", (8, 6))]) == [
+        "Cream surface with subtle linear veining."
+    ]
+    assert len(calls) == 2
+
+
+def test_qwen_request_rejection_is_reported_as_an_input_error(monkeypatch):
+    def reject(*_args, **_kwargs):
+        request = httpx.Request("POST", "http://127.0.0.1:8200/v1/chat/completions")
+        return httpx.Response(400, request=request, json={"error": "image is not supported"})
+
+    monkeypatch.setattr("app.provider.httpx.post", reject)
+    provider = QwenCaptionProvider(Settings())
+    with pytest.raises(ValueError, match="HTTP 400.*image is not supported"):
+        provider.caption_images([Image.new("RGB", (8, 6))])
 
 
 def test_image_validation_accepts_png():

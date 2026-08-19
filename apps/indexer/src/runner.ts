@@ -3,12 +3,13 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { Job } from "bullmq";
-import type { ImageAsset, IndexRunMode, ProductDocument, VisualGeneration, VisualModel } from "@samplehub/contracts";
+import type { CaptionProvider, ImageAsset, IndexRunMode, IndexScope, ProductDocument, VisualGeneration, VisualModel } from "@samplehub/contracts";
 import { buildEmbeddingText } from "@samplehub/catalog";
 import { runBatchWithIsolation } from "./batch-isolation";
 import { CatalogRepository } from "./catalog";
 import { ImageSource, InferenceClient, isInferenceInputError, MeiliClient } from "./clients";
 import { config } from "./config";
+import { captionEmbedder, captionField, captionModel, captionReadyKey } from "./caption-provider";
 import { selectEmbeddingImages } from "./image-selection";
 import { CatalogImageError, normalizeCatalogImage } from "./image-normalizer";
 import { mergeTextVector, mergeVisualVector, validVisualVectorSet, type VisualEmbedder } from "./visual-vectors";
@@ -19,6 +20,8 @@ interface IndexJobData {
   mode: IndexRunMode;
   generation?: VisualGeneration;
   productLimit?: number;
+  captionProvider?: CaptionProvider;
+  targetScope?: IndexScope;
 }
 
 interface AssetWork {
@@ -65,7 +68,7 @@ interface VisualBackfillTarget {
 }
 
 interface CaptionBackfillCandidate {
-  product: ProductDocument;
+  product: ProductDocument & { _vectors: Record<string, unknown> };
   caption: string | null;
 }
 
@@ -246,6 +249,8 @@ export class IndexRunner {
       await this.meili.smoke(previewTarget!);
       await this.meili.deleteIndex(shadow);
       this.setSetting(`preview_${generation}_metadata`, { sourceCount: sourceTotal, limit: productLimit, count: total, generation, coverage, qualityWarning, completedAt: new Date().toISOString() });
+      this.setSetting(captionReadyKey(previewTarget!, config.CAPTION_INDEX_PROVIDER), config.CAPTION_FINGERPRINTS[config.CAPTION_INDEX_PROVIDER]);
+      this.deleteSetting(captionReadyKey(previewTarget!, config.CAPTION_INDEX_PROVIDER === "qwen" ? "florence" : "qwen"));
       return;
     }
     if (!(await this.meili.exists(config.MEILI_INDEX_UID))) await this.meili.create(config.MEILI_INDEX_UID);
@@ -256,6 +261,8 @@ export class IndexRunner {
     this.setSetting("siglip_ready_fingerprint", visualFingerprint("siglip2", generation));
     this.setSetting("dinov2_ready_fingerprint", visualFingerprint("dinov2", generation));
     this.setSetting("dinov3_ready_fingerprint", visualFingerprint("dinov3", generation));
+    this.setSetting(captionReadyKey(config.MEILI_INDEX_UID, config.CAPTION_INDEX_PROVIDER), config.CAPTION_FINGERPRINTS[config.CAPTION_INDEX_PROVIDER]);
+    this.deleteSetting(captionReadyKey(config.MEILI_INDEX_UID, config.CAPTION_INDEX_PROVIDER === "qwen" ? "florence" : "qwen"));
     this.setWatermark("products", rebuildStartedAt, "");
     this.setWatermark("files", rebuildStartedAt, "");
   }
@@ -263,7 +270,14 @@ export class IndexRunner {
   private async incremental(job: Job<{ runId: string }>) {
     const runId = job.data.runId;
     if (!(await this.meili.exists(config.MEILI_INDEX_UID))) throw new Error("Run a full index before incremental indexing");
-    if (!(await this.meili.hasEmbedder(config.MEILI_INDEX_UID, "e5_text"))) throw new Error("The stable index uses the legacy vector schema; run a full index first");
+    if (!(await this.meili.hasEmbedder(config.MEILI_INDEX_UID, captionEmbedder(config.CAPTION_INDEX_PROVIDER)))) throw new Error(`The stable index does not have ${config.CAPTION_INDEX_PROVIDER} caption vectors; run a full index or provider backfill first`);
+    const captionReadiness = this.getSetting(captionReadyKey(config.MEILI_INDEX_UID, config.CAPTION_INDEX_PROVIDER));
+    if (config.CAPTION_INDEX_PROVIDER === "qwen" && captionReadiness !== config.CAPTION_FINGERPRINTS.qwen) {
+      throw new Error("Complete a successful stable Qwen caption backfill before Qwen-only incremental indexing");
+    }
+    if (config.CAPTION_INDEX_PROVIDER === "florence" && captionReadiness !== null && captionReadiness !== config.CAPTION_FINGERPRINTS.florence) {
+      throw new Error("Complete a successful stable Florence caption backfill before incremental indexing with the changed caption settings");
+    }
     const productWatermark = this.watermark("products");
     const fileWatermark = this.watermark("files");
     const changes = await this.catalog.changedProductIds(productWatermark, fileWatermark);
@@ -337,6 +351,10 @@ export class IndexRunner {
     }
     this.setWatermark("products", changes.productMax, "");
     this.setWatermark("files", changes.fileMax, "");
+    if (changes.ids.length) {
+      this.setSetting(captionReadyKey(config.MEILI_INDEX_UID, config.CAPTION_INDEX_PROVIDER), config.CAPTION_FINGERPRINTS[config.CAPTION_INDEX_PROVIDER]);
+      this.setSetting(captionReadyKey(config.MEILI_INDEX_UID, config.CAPTION_INDEX_PROVIDER === "qwen" ? "florence" : "qwen"), "invalidated");
+    }
   }
 
   private backfillTarget(model: "dinov2" | "dinov3"): VisualBackfillTarget {
@@ -356,7 +374,7 @@ export class IndexRunner {
   private async visualBackfill(job: Job<{ runId: string }>, target: VisualBackfillTarget) {
     const runId = job.data.runId;
     if (!(await this.meili.exists(config.MEILI_INDEX_UID))) throw new Error(`Run a full index before backfilling ${target.label}`);
-    if (!(await this.meili.hasEmbedder(config.MEILI_INDEX_UID, "e5_text"))) throw new Error("The stable index uses the legacy vector schema; run a full index first");
+    if (!(await this.meili.hasEmbedder(config.MEILI_INDEX_UID, "e5_text")) && !(await this.meili.hasEmbedder(config.MEILI_INDEX_UID, "e5_text_qwen"))) throw new Error("The stable index has no caption-aware E5 embedder; run a full index first");
     if ((await this.meili.generation(config.MEILI_INDEX_UID)) !== "current") {
       throw new Error(`${target.label} current-generation backfill requires a current-generation full rebuild`);
     }
@@ -385,8 +403,8 @@ export class IndexRunner {
       const existing = await this.meili.vectors(config.MEILI_INDEX_UID, products.map((product) => product.id));
       for (const product of products) {
         const vectors = existing.get(product.id)?.vectors;
-        if (!vectors || !("e5_text" in vectors) || !("siglip_image_v2" in vectors)) {
-          throw new Error(`Cannot safely merge ${target.label} vectors for product ${product.id}: existing e5_text or siglip_image_v2 vectors were not returned`);
+        if (!vectors || (!("e5_text" in vectors) && !("e5_text_qwen" in vectors)) || !("siglip_image_v2" in vectors)) {
+          throw new Error(`Cannot safely merge ${target.label} vectors for product ${product.id}: an E5 or SigLIP vector was not returned`);
         }
       }
       const imageVectors: number[][][] = products.map(() => []);
@@ -500,48 +518,39 @@ export class IndexRunner {
     this.setSetting(target.readySetting, target.fingerprint);
   }
 
-  private async captionBackfill(job: Job<{ runId: string }>) {
-    const runId = job.data.runId;
-    if (!(await this.meili.exists(config.MEILI_INDEX_UID))) {
-      throw new Error("Run a full index before backfilling captions");
+  private async captionBackfill(job: Job<IndexJobData>) {
+    const { runId } = job.data;
+    const provider = job.data.captionProvider ?? "florence";
+    const scope = job.data.targetScope ?? "stable";
+    const uid = this.indexUidForScope(scope);
+    const field = captionField(provider);
+    const embedder = captionEmbedder(provider);
+    const model = captionModel(provider);
+    if (!(await this.meili.exists(uid))) throw new Error(`The ${scope} index does not exist`);
+    if (!(await this.meili.hasEmbedder(uid, embedder))) {
+      await this.seedCaptionOptOuts(job, runId, uid, embedder);
     }
-    if (!(await this.meili.hasEmbedder(config.MEILI_INDEX_UID, "e5_text"))) {
-      throw new Error("The stable index uses the legacy vector schema; run a full index first");
-    }
-    const total = await this.catalog.count();
-    const generation = await this.meili.generation(config.MEILI_INDEX_UID);
-    const siglipEmbedder = visualEmbedder("siglip2", generation);
-    const indexedTotal = await this.meili.count(config.MEILI_INDEX_UID);
-    if (indexedTotal !== total) {
-      throw new Error(`Caption backfill requires matching source and index counts; source has ${total} products and Meilisearch has ${indexedTotal}`);
-    }
+    await this.meili.ensureCaptionEmbedder(uid, provider);
+    const total = await this.meili.count(uid);
     this.update(runId, {
       total_products: total,
-      config_fingerprint: config.CAPTION_BACKFILL_FINGERPRINT,
+      config_fingerprint: config.CAPTION_FINGERPRINTS[provider],
+      caption_provider: provider,
+      target_scope: scope,
     });
 
-    let after: string | null = null;
     let processed = 0;
     let captioned = 0;
     let cached = 0;
     let failedCaptions = 0;
     let normalizedImages = 0;
     let rejectedSourceImages = 0;
+    let smokeVector: number[] | null = null;
+    let consecutiveQwenFailures = 0;
     for (;;) {
       this.assertActive(runId);
-      const products = await this.catalog.batch(after, 20);
+      const products = await this.meili.documentPage(uid, processed, 20);
       if (!products.length) break;
-      const existing = await this.meili.vectors(
-        config.MEILI_INDEX_UID,
-        products.map((product) => product.id),
-      );
-      for (const product of products) {
-        const vectors = existing.get(product.id)?.vectors;
-        if (!vectors || !("e5_text" in vectors) || !(siglipEmbedder in vectors)) {
-          throw new Error(`Cannot safely update caption for product ${product.id}: existing e5_text or ${siglipEmbedder} vectors were not returned`);
-        }
-      }
-
       const candidates: CaptionBackfillCandidate[] = [];
       const imageWorks = products.flatMap((product) => {
         const asset = selectEmbeddingImages(product, "thumbnail")[0];
@@ -551,94 +560,92 @@ export class IndexRunner {
         }
         return [{ product, asset }];
       });
-      const misses: Array<{ product: ProductDocument; asset: ImageAsset; buffer: Buffer; sha256: string }> = [];
+      const misses: Array<{ product: (typeof products)[number]; asset: ImageAsset; buffer: Buffer; sha256: string }> = [];
       for (let offset = 0; offset < imageWorks.length; offset += 8) {
         const chunk = imageWorks.slice(offset, offset + 8);
-        const settled = await Promise.allSettled(chunk.map(async (work) => {
-          const source = await this.imageSource.get(work.asset.url);
-          return normalizeCatalogImage(source);
-        }));
+        const settled = await Promise.allSettled(chunk.map(async (work) => normalizeCatalogImage(await this.imageSource.get(work.asset.url))));
         settled.forEach((entry, position) => {
           const work = chunk[position]!;
           if (entry.status === "rejected") {
             failedCaptions++;
             if (entry.reason instanceof CatalogImageError && entry.reason.code === "catalog_image_source_too_large") rejectedSourceImages++;
-            const code = entry.reason instanceof CatalogImageError ? entry.reason.code : "caption_s3_download";
-            this.failure(runId, work.product.id, work.asset.id, code, String(entry.reason));
+            this.failure(runId, work.product.id, work.asset.id, entry.reason instanceof CatalogImageError ? entry.reason.code : "caption_s3_download", String(entry.reason));
+            if (!(typeof work.product[field] === "string" && embedder in work.product._vectors)) candidates.push({ product: work.product, caption: null });
             return;
           }
           if (entry.value.normalized) normalizedImages++;
           const sha256 = createHash("sha256").update(entry.value.buffer).digest("hex");
-          const caption = this.cachedCaption(work.asset.id, sha256);
-          if (caption !== null) {
+          const cachedCaption = this.cachedCaption(work.asset.id, sha256, provider);
+          if (cachedCaption !== undefined) {
             cached++;
-            candidates.push({ product: work.product, caption });
-          } else {
-            misses.push({ ...work, buffer: entry.value.buffer, sha256 });
-          }
+            candidates.push({ product: work.product, caption: cachedCaption });
+          } else misses.push({ ...work, buffer: entry.value.buffer, sha256 });
         });
       }
 
-      for (let offset = 0; offset < misses.length; offset += config.MAX_CAPTION_BATCH) {
-        const chunk = misses.slice(offset, offset + config.MAX_CAPTION_BATCH);
-        const result = await runBatchWithIsolation(
-          chunk,
-          (batch) => this.inference.captions(batch.map((work) => work.buffer)),
-          isInferenceInputError,
-        );
+      for (let offset = 0; offset < misses.length; offset += model.batch) {
+        const chunk = misses.slice(offset, offset + model.batch);
+        const result = await runBatchWithIsolation(chunk, (batch) => this.inference.captions(batch.map((work) => work.buffer), provider), isInferenceInputError);
         const serviceFailure = result.failures.find(({ error }) => !isInferenceInputError(error));
         if (serviceFailure) throw serviceFailure.error;
         for (const { item: work, value } of result.successes) {
-          const caption = value.trim();
-          if (!caption) {
+          consecutiveQwenFailures = 0;
+          const caption = value?.trim() || null;
+          if (provider === "florence" && !caption) {
             failedCaptions++;
             this.failure(runId, work.product.id, work.asset.id, "captioning", "Florence returned an empty caption");
+            if (!(typeof work.product[field] === "string" && embedder in work.product._vectors)) candidates.push({ product: work.product, caption: null });
             continue;
           }
-          this.storeCaption(work.asset.id, work.sha256, caption);
+          this.storeCaption(work.asset.id, work.sha256, caption, provider);
           captioned++;
           candidates.push({ product: work.product, caption });
         }
         for (const { item: work, error } of result.failures) {
           failedCaptions++;
           this.failure(runId, work.product.id, work.asset.id, "captioning", String(error));
+          if (!(typeof work.product[field] === "string" && embedder in work.product._vectors)) candidates.push({ product: work.product, caption: null });
+          if (provider === "qwen" && ++consecutiveQwenFailures >= 5) {
+            throw new Error(`Qwen rejected ${consecutiveQwenFailures} consecutive catalog images; stopping because this indicates a systemic server or request configuration problem`);
+          }
         }
       }
 
-      const textVectors = candidates.length
-        ? await this.inference.textPassages(
-          candidates.map(({ product, caption }) => buildEmbeddingText(product, caption)),
-        )
-        : [];
-      if (textVectors.length !== candidates.length) {
-        throw new Error("Inference text response count did not match caption backfill candidates");
-      }
+      const textVectors = candidates.length ? await this.inference.textPassages(candidates.map(({ product, caption }) => buildEmbeddingText(product, caption))) : [];
+      if (textVectors.length !== candidates.length) throw new Error("Inference text response count did not match caption backfill candidates");
+      smokeVector ??= textVectors[0] ?? null;
       this.assertActive(runId);
-      await this.meili.updateDocuments(
-        config.MEILI_INDEX_UID,
-        candidates.map(({ product, caption }, index) => ({
-          id: product.id,
-          generatedVisualCaption: caption,
-          _vectors: mergeTextVector(existing.get(product.id)!.vectors, textVectors[index]!),
-        })),
-      );
-
+      await this.meili.updateDocuments(uid, candidates.map(({ product, caption }, index) => ({
+        id: product.id,
+        [field]: caption,
+        _vectors: mergeTextVector(product._vectors, textVectors[index]!, embedder),
+      })));
       processed += products.length;
-      after = products.at(-1)!.id;
-      this.update(runId, {
-        processed_products: processed,
-        captioned_images: captioned,
-        cached_captions: cached,
-        failed_captions: failedCaptions,
-        normalized_images: normalizedImages,
-        rejected_source_images: rejectedSourceImages,
-      });
+      this.update(runId, { processed_products: processed, captioned_images: captioned, cached_captions: cached, failed_captions: failedCaptions, normalized_images: normalizedImages, rejected_source_images: rejectedSourceImages });
       await job.updateProgress(total ? Math.round((processed / total) * 100) : 100);
     }
-    if (processed !== total) {
-      throw new Error(`Expected ${total} products but backfilled captions for ${processed}`);
-    }
+    if (processed !== total) throw new Error(`Expected ${total} products but visited ${processed}`);
+    await this.assertCaptionCoverage(uid, embedder, total);
+    if (smokeVector) await this.meili.semanticSmoke(uid, embedder, smokeVector);
+    this.setSetting(captionReadyKey(uid, provider), config.CAPTION_FINGERPRINTS[provider]);
     await job.updateProgress(100);
+  }
+
+  private async seedCaptionOptOuts(job: Job<IndexJobData>, runId: string, uid: string, embedder: "e5_text" | "e5_text_qwen") {
+    const expected = await this.meili.count(uid);
+    let offset = 0;
+    for (;;) {
+      this.assertActive(runId);
+      const page = await this.meili.vectorPage(uid, offset, 200);
+      if (!page.length) break;
+      const updates = page.flatMap((document) => Object.prototype.hasOwnProperty.call(document.vectors, embedder)
+        ? []
+        : [{ id: document.id, _vectors: { ...document.vectors, [embedder]: null } }]);
+      await this.meili.updateVectors(uid, updates);
+      offset += page.length;
+      await job.updateProgress(0);
+    }
+    if (offset !== expected) throw new Error(`Expected to initialize ${expected} caption vectors but visited ${offset}`);
   }
 
   private async seedVisualOptOuts(job: Job<{ runId: string }>, runId: string, target: VisualBackfillTarget) {
@@ -650,8 +657,8 @@ export class IndexRunner {
       if (!page.length) break;
       const updates: Array<{ id: string; _vectors: Record<string, unknown> }> = [];
       for (const document of page) {
-        if (!("e5_text" in document.vectors) || !("siglip_image_v2" in document.vectors)) {
-          throw new Error(`Cannot safely initialize ${target.label} for product ${document.id}: existing e5_text or siglip_image_v2 vectors were not returned`);
+        if ((!("e5_text" in document.vectors) && !("e5_text_qwen" in document.vectors)) || !("siglip_image_v2" in document.vectors)) {
+          throw new Error(`Cannot safely initialize ${target.label} for product ${document.id}: an E5 or SigLIP vector was not returned`);
         }
         if (!Object.prototype.hasOwnProperty.call(document.vectors, target.embedder)) {
           updates.push({ id: document.id, _vectors: mergeVisualVector(document.vectors, target.embedder, null) });
@@ -670,6 +677,10 @@ export class IndexRunner {
     visual = { dinov2: true, dinov3: true },
     generation: VisualGeneration = "current",
   ): Promise<PrepareResult> {
+    const captionProvider = config.CAPTION_INDEX_PROVIDER;
+    const captionTargetField = captionField(captionProvider);
+    const captionTargetEmbedder = captionEmbedder(captionProvider);
+    const captionConfig = captionModel(captionProvider);
     const works = new Map<string, AssetWork>();
     let referenced = 0;
     let eligibleProducts = 0;
@@ -803,8 +814,8 @@ export class IndexRunner {
     let cached = 0;
     for (const work of captionWorks) {
       const sha256 = createHash("sha256").update(buffers.get(work.key)!).digest("hex");
-      const caption = this.cachedCaption(work.asset.id, sha256);
-      if (caption !== null) {
+      const caption = this.cachedCaption(work.asset.id, sha256, captionProvider);
+      if (caption !== undefined) {
         captions[work.productIndex] = caption;
         cached++;
       } else misses.push({ ...work, sha256 });
@@ -812,27 +823,36 @@ export class IndexRunner {
 
     let captioned = 0;
     let failedCaptions = 0;
-    for (let offset = 0; offset < misses.length; offset += config.MAX_CAPTION_BATCH) {
-      const chunk = misses.slice(offset, offset + config.MAX_CAPTION_BATCH);
+    let consecutiveQwenFailures = 0;
+    for (let offset = 0; offset < misses.length; offset += captionConfig.batch) {
+      const chunk = misses.slice(offset, offset + captionConfig.batch);
       const result = await runBatchWithIsolation(
         chunk,
-        (batch) => this.inference.captions(batch.map((work) => buffers.get(work.key)!)),
+        (batch) => this.inference.captions(batch.map((work) => buffers.get(work.key)!), captionProvider),
         isInferenceInputError,
       );
+      if (captionProvider === "qwen") {
+        const serviceFailure = result.failures.find(({ error }) => !isInferenceInputError(error));
+        if (serviceFailure) throw serviceFailure.error;
+      }
       for (const { item: work, value: caption } of result.successes) {
-        const normalized = caption.trim();
-        if (!normalized) {
+        consecutiveQwenFailures = 0;
+        const normalized = caption?.trim() || null;
+        if (captionProvider === "florence" && !normalized) {
           failedCaptions++;
           this.failure(runId, work.productId, work.asset.id, "captioning", "Florence returned an empty caption");
           continue;
         }
         captions[work.productIndex] = normalized;
-        this.storeCaption(work.asset.id, work.sha256, normalized);
+        this.storeCaption(work.asset.id, work.sha256, normalized, captionProvider);
         captioned++;
       }
       for (const { item: work, error } of result.failures) {
         failedCaptions++;
         this.failure(runId, work.productId, work.asset.id, "captioning", String(error));
+        if (captionProvider === "qwen" && ++consecutiveQwenFailures >= 5) {
+          throw new Error(`Qwen rejected ${consecutiveQwenFailures} consecutive catalog images; stopping because this indicates a systemic server or request configuration problem`);
+        }
       }
     }
 
@@ -840,7 +860,7 @@ export class IndexRunner {
     if (textVectors.length !== products.length) throw new Error("Inference text response count did not match request");
     const documents = products.map((product, index) => {
       const vectors: Record<string, number[] | number[][] | undefined> = {
-        e5_text: textVectors[index],
+        [captionTargetEmbedder]: textVectors[index],
         [visualEmbedder("siglip2", generation)]: siglipImageVectors[index],
       };
       if (visual.dinov2) vectors[visualEmbedder("dinov2", generation)] = dinov2ImageVectors[index];
@@ -858,7 +878,7 @@ export class IndexRunner {
           ...(visual.dinov3 ? { dinov3: dinov3ImageVectors[index]!.length } : {}),
         },
       };
-      return { ...product, generatedVisualCaption: captions[index], _visualEmbeddingState: state, _vectors: vectors };
+      return { ...product, [captionTargetField]: captions[index], _visualEmbeddingState: state, _vectors: vectors };
     });
     return {
       documents, referenced, embedded, failed, captioned, cached, failedCaptions,
@@ -870,20 +890,38 @@ export class IndexRunner {
     };
   }
 
-  private cachedCaption(imageId: string, sourceSha256: string): string | null {
+  private cachedCaption(imageId: string, sourceSha256: string, provider: CaptionProvider = config.CAPTION_INDEX_PROVIDER): string | null | undefined {
+    const model = captionModel(provider);
     const row = this.db.prepare(`SELECT caption FROM image_caption_cache
       WHERE image_id=? AND source_sha256=? AND model_id=? AND model_revision=? AND task=?`).get(
-      imageId, sourceSha256, config.CAPTION_MODEL_ID, config.CAPTION_MODEL_REVISION, config.CAPTION_CACHE_KEY,
+      imageId, sourceSha256, model.modelId, model.revision, model.task,
     ) as { caption?: string } | undefined;
-    return row?.caption ?? null;
+    return row ? row.caption || null : undefined;
   }
 
-  private storeCaption(imageId: string, sourceSha256: string, caption: string) {
+  private storeCaption(imageId: string, sourceSha256: string, caption: string | null, provider: CaptionProvider = config.CAPTION_INDEX_PROVIDER) {
+    const model = captionModel(provider);
     this.db.prepare(`INSERT INTO image_caption_cache(image_id,source_sha256,model_id,model_revision,task,caption)
       VALUES(?,?,?,?,?,?) ON CONFLICT(image_id,source_sha256,model_id,model_revision,task)
       DO UPDATE SET caption=excluded.caption,updated_at=CURRENT_TIMESTAMP`).run(
-      imageId, sourceSha256, config.CAPTION_MODEL_ID, config.CAPTION_MODEL_REVISION, config.CAPTION_CACHE_KEY, caption,
+      imageId, sourceSha256, model.modelId, model.revision, model.task, caption ?? "",
     );
+  }
+
+  private indexUidForScope(scope: IndexScope): string {
+    return scope === "stable" ? config.MEILI_INDEX_UID : previewIndexUid(scope === "preview_legacy" ? "legacy" : "current");
+  }
+
+  private async assertCaptionCoverage(uid: string, embedder: string, expected: number) {
+    let offset = 0;
+    for (;;) {
+      const page = await this.meili.vectorPage(uid, offset, 200);
+      if (!page.length) break;
+      const missing = page.find((document) => !(embedder in document.vectors));
+      if (missing) throw new Error(`Caption provider vector ${embedder} is missing for product ${missing.id}`);
+      offset += page.length;
+    }
+    if (offset !== expected) throw new Error(`Caption readiness scan visited ${offset} of ${expected} products`);
   }
 
   private assertActive(runId: string) {
@@ -932,5 +970,8 @@ export class IndexRunner {
   private setSetting(key: string, value: unknown) {
     this.db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP`).run(key, JSON.stringify(value));
+  }
+  private deleteSetting(key: string) {
+    this.db.prepare("DELETE FROM settings WHERE key=?").run(key);
   }
 }

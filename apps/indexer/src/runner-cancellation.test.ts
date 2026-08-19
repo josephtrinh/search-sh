@@ -14,7 +14,7 @@ test("a recovered cancelling rebuild cleans its shadow before finalizing", async
   const { IndexRunner } = await import("./runner");
   const calls: string[] = [];
   const updates: Array<Record<string, unknown>> = [];
-  const runner = Object.create(IndexRunner.prototype) as IndexRunner & Record<string, unknown>;
+  const runner = Object.create(IndexRunner.prototype) as InstanceType<typeof IndexRunner> & Record<string, unknown>;
   Object.assign(runner, {
     cancelling: () => true,
     cleanupRunShadow: async () => { calls.push("cleanup"); },

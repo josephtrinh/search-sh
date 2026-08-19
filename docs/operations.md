@@ -11,7 +11,7 @@ curl http://127.0.0.1:7700/health
 redis-cli -h 127.0.0.1 -p 6379 ping
 ```
 
-Inference health reports SigLIP, DINOv2, DINOv3, E5, and Florence independently. `loaded: false` is normal before a provider's first request. API health reports Meilisearch and inference reachability. A missing stable index is expected before the first full build.
+Inference health reports SigLIP, DINOv2, DINOv3, E5, Florence, and the Qwen llama-server client independently. `loaded: false` is normal before an in-process provider's first request. API health reports Meilisearch and inference reachability. A missing stable index is expected before the first full build.
 
 ## Node native-module recovery
 
@@ -41,7 +41,7 @@ Florence uses revision-pinned remote model code. Review a new revision before up
 
 ## Index runs
 
-Use full indexing for the first build and after changing image mode, indexed fields, vector dimensions, or general Meilisearch settings. Incremental indexing is for routine source changes and deliberately fails on the legacy `siglip_text` schema. An existing v2 index can refresh Florence captions plus E5 or add either DINO model through dedicated backfills instead of a full rebuild.
+Use full indexing for the first build and after changing image mode, indexed fields, vector dimensions, or general Meilisearch settings. Incremental indexing is for routine source changes and deliberately fails on the legacy `siglip_text` schema. An existing v2 index can independently backfill Florence or Qwen captions plus E5, or add either DINO model, without a full rebuild.
 
 Current-generation defaults are SigLIP 2 Base NaFlex with 576 patches, DINOv2 at 392 with normalized CLS/patch-mean pooling, and DINOv3 at 384 with the same pooling after excluding register tokens. Current catalog images use a whole-image view plus adaptive long-axis crops; DINO inputs are letterboxed. Before those model-specific transforms, inputs over 25 million pixels or 9 MiB are auto-oriented and normalized within a 4096-pixel edge. Sources over 150 million pixels or 50 MiB are rejected. Normal images pass through unchanged. These settings are fingerprinted, so changing them invalidates backfill resume state.
 
@@ -67,7 +67,9 @@ After deploying these normalization changes while an older preview is already ru
 
 ### Caption and E5 backfill
 
-After changing `CAPTION_TASK`, the Florence model/revision, or generation settings, restart inference, API, and indexer and click **Backfill captions + E5** in `/admin`. The current v2 index must have the same document count as the eligible source catalog. The run updates the stable index in place and invokes only Florence and E5; all SigLIP and DINO vectors are preserved.
+After changing a provider's task, prompt version, model fingerprint, or generation settings, restart inference, API, and indexer. Select the target index scope in `/admin`, then click **Backfill Florence** or **Backfill Qwen**. Start `pnpm qwen:dev` for Qwen generation. The run visits that index's exact document set and invokes only the selected caption provider plus E5; all other fields and vectors are preserved.
+
+The Qwen launcher reads `QWEN_CONTEXT_SIZE` and `QWEN_IMAGE_MAX_TOKENS` from the root `.env` and defaults to 8192 and 4096 respectively. Context must accommodate the system/user prompts, visual tokens, and generated caption. The image-token setting caps llama.cpp's dynamic-resolution vision representation after catalog-image normalization; it is not a raw pixel or byte limit.
 
 The current image hash, caption model/revision, task, token limit, and beam count select the SQLite cache entry. A new task such as `<MORE_DETAILED_CAPTION>` therefore generates new captions, while a retry reuses successful entries. Products without images receive a null generated caption and an E5 passage built from structured catalog text alone.
 

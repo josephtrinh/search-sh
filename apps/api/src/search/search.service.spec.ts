@@ -39,6 +39,17 @@ describe("SearchService", () => {
     const branches = (service as any).buildBranches("image_visual", "", { image: [3] }, undefined, defaultRankingConfig, true, "dinov2", "current", "products_preview_current");
     expect(branches[0].query).toMatchObject({ indexUid: "products_preview_current", hybrid: { embedder: "dinov2_image_v2" } });
   });
+  it("uses only the Qwen caption field and vector when Qwen is active", () => {
+    const branches = (service as any).buildBranches("text_hybrid", "warm stone", { semantic: [1] }, undefined, defaultRankingConfig, true, "siglip2", "current", "products_preview_current", "qwen");
+    expect(branches.find((branch: any) => branch.source === "semantic").query.hybrid.embedder).toBe("e5_text_qwen");
+    const attributes = branches.find((branch: any) => branch.source === "keyword").query.attributesToSearchOn;
+    expect(attributes).toContain("generatedVisualCaptionQwen");
+    expect(attributes).not.toContain("generatedVisualCaption");
+  });
+  it("rejects a cursor after the caption provider changes", () => {
+    const cursor = (service as any).encodeCursor(24, "siglip2", "current", "products", "florence");
+    expect(() => (service as any).decodeCursor(cursor, "siglip2", "current", "products", "qwen")).toThrow("caption provider");
+  });
   it("keeps a selectable legacy DINO model active even when its old fingerprint differs", async () => {
     let configured = "siglip2";
     const legacyState = {

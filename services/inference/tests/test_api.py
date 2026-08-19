@@ -43,6 +43,11 @@ def test_text_and_image_endpoints(monkeypatch):
             },
         )
         caption = client.post("/v1/caption/images", json={"images": [make_image()], "priority": 10})
+        qwen_caption = client.post(
+            "/v1/caption/images",
+            json={"images": [make_image()], "provider": "qwen", "priority": 10},
+        )
+        health = client.get("/health")
 
         def fail(_images, _generation):
             raise RuntimeError("DINOv3 archive was not found")
@@ -59,6 +64,7 @@ def test_text_and_image_endpoints(monkeypatch):
     assert dinov3.status_code == 200
     assert catalog.status_code == 200
     assert caption.status_code == 200
+    assert qwen_caption.status_code == 200
     assert len(text.json()["embeddings"][0]) == 32
     assert len(visual_text.json()["embeddings"][0]) == 32
     assert len(image.json()["embeddings"][0]) == 32
@@ -68,5 +74,7 @@ def test_text_and_image_endpoints(monkeypatch):
     assert dinov2.json()["model_id"] == "deterministic-dinov2-provider"
     assert dinov3.json()["model_id"] == "deterministic-dinov3-provider"
     assert caption.json()["captions"] == ["Test image with dimensions 8 by 8."]
+    assert qwen_caption.json()["provider"] == "qwen"
+    assert health.json()["models"]["qwen"]["model_id"] == "deterministic-qwen-caption-provider"
     assert model_error.status_code == 503
     assert model_error.json()["detail"] == "DINOv3 archive was not found"

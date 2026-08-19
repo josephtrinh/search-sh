@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
-import { facetKeys, FiltersSchema, SearchRequestSchema, type FacetKey, type GroupDetail, type IndexScope, type IndexScopeStatus, type ProductDocument, type RankingConfig, type SearchFilters, type SearchResponse, type VisualGeneration, type VisualModel, type VisualModelStatus } from "@samplehub/contracts";
+import { facetKeys, FiltersSchema, SearchRequestSchema, type CaptionProvider, type CaptionProviderStatus, type FacetKey, type GroupDetail, type IndexScope, type IndexScopeStatus, type ProductDocument, type RankingConfig, type SearchFilters, type SearchResponse, type VisualGeneration, type VisualModel, type VisualModelStatus } from "@samplehub/contracts";
 import { getConfig } from "../common/config";
 import { StateService } from "../state/state.service";
 import { interpretQuery, interpretedFields, type AttributeVocabulary, type DerivedFilterGroup, type QueryInterpretation } from "./query-interpreter";
@@ -16,11 +16,14 @@ const FACET_FIELD: Record<FacetKey, string> = {
   model: "model", surface: "surface", edge: "edge", sizeGroup: "sizeGroup", waterAbsorption: "waterAbsorption",
   fireResistance: "fireResistance", price: "price", availability: "availability",
 };
+const COMMON_SEARCH_ATTRIBUTES = ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","attributes"];
+const captionField = (provider: CaptionProvider) => provider === "qwen" ? "generatedVisualCaptionQwen" : "generatedVisualCaption";
+const captionEmbedder = (provider: CaptionProvider) => provider === "qwen" ? "e5_text_qwen" : "e5_text";
 
 @Injectable()
 export class SearchService {
   private readonly config = getConfig();
-  private schemaCache = new Map<string, { v2: boolean; generation: VisualGeneration; siglip2: boolean; dinov2: boolean; dinov3: boolean; expiresAt: number }>();
+  private schemaCache = new Map<string, { v2: boolean; generation: VisualGeneration; siglip2: boolean; dinov2: boolean; dinov3: boolean; florence: boolean; qwen: boolean; expiresAt: number }>();
   private vocabularyCache = new Map<string, { value: AttributeVocabulary; expiresAt: number }>();
   constructor(private readonly state: StateService) {}
 
@@ -39,12 +42,14 @@ export class SearchService {
     return scope === "stable" ? this.config.MEILI_INDEX_UID : `${this.config.MEILI_INDEX_UID}_preview_${scope === "preview_legacy" ? "legacy" : "current"}`;
   }
 
-  private async indexSchema(uid = this.indexUid()): Promise<{ v2: boolean; generation: VisualGeneration; siglip2: boolean; dinov2: boolean; dinov3: boolean }> {
+  private async indexSchema(uid = this.indexUid()): Promise<{ v2: boolean; generation: VisualGeneration; siglip2: boolean; dinov2: boolean; dinov3: boolean; florence: boolean; qwen: boolean }> {
     const cached = this.schemaCache.get(uid);
     if (cached && cached.expiresAt > Date.now()) return cached;
     try {
       const settings = await this.meili(`/indexes/${uid}/settings`);
-      const v2 = Boolean(settings.embedders?.e5_text);
+      const florence = Boolean(settings.embedders?.e5_text);
+      const qwen = Boolean(settings.embedders?.e5_text_qwen);
+      const v2 = florence || qwen;
       const generation: VisualGeneration = settings.embedders?.siglip_image_v2 ? "current" : "legacy";
       const suffix = generation === "current" ? "_v2" : "";
       const value = {
@@ -53,12 +58,14 @@ export class SearchService {
         siglip2: Boolean(settings.embedders?.[`siglip_image${suffix}`]),
         dinov2: Boolean(settings.embedders?.[`dinov2_image${suffix}`]),
         dinov3: Boolean(settings.embedders?.[`dinov3_image${suffix}`]),
+        florence,
+        qwen,
         expiresAt: Date.now() + 5000,
       };
       this.schemaCache.set(uid, value);
       return value;
     } catch (error) {
-      if (error instanceof NotFoundException) return { v2: false, generation: "legacy", siglip2: false, dinov2: false, dinov3: false };
+      if (error instanceof NotFoundException) return { v2: false, generation: "legacy", siglip2: false, dinov2: false, dinov3: false, florence: false, qwen: false };
       throw error;
     }
   }
@@ -125,6 +132,27 @@ export class SearchService {
     return this.visualModelStatus();
   }
 
+  async captionProviderStatus(): Promise<CaptionProviderStatus> {
+    const scope = this.state.getIndexScope();
+    const uid = this.indexUid(scope);
+    const schema = await this.indexSchema(uid);
+    const florenceFingerprint = this.state.getSetting<string>(`caption_ready:${uid}:florence`);
+    const qwenFingerprint = this.state.getSetting<string>(`caption_ready:${uid}:qwen`);
+    const florenceReady = schema.florence && (florenceFingerprint === null || florenceFingerprint === this.config.CAPTION_FINGERPRINTS.florence);
+    const qwenReady = schema.qwen && qwenFingerprint === this.config.CAPTION_FINGERPRINTS.qwen;
+    const configured = this.state.getConfiguredCaptionProvider();
+    const active: CaptionProvider = configured === "qwen" && qwenReady ? "qwen" : configured === "florence" && florenceReady ? "florence" : qwenReady ? "qwen" : "florence";
+    return { configured, active, scope, florenceReady, qwenReady, florenceFingerprint, qwenFingerprint };
+  }
+
+  async setCaptionProvider(provider: CaptionProvider): Promise<CaptionProviderStatus> {
+    const status = await this.captionProviderStatus();
+    if (provider === "qwen" && !status.qwenReady) throw new ConflictException("Qwen captions are not ready for the active index scope. Complete a Qwen caption backfill first.");
+    if (provider === "florence" && !status.florenceReady) throw new ConflictException("Florence captions are not ready for the active index scope.");
+    this.state.setConfiguredCaptionProvider(provider);
+    return this.captionProviderStatus();
+  }
+
   private async embed(path: "text" | "visual-text" | "images", values: string[], model: VisualModel = "siglip2", generation: VisualGeneration = "legacy"): Promise<{ vectors: number[][]; milliseconds: number }> {
     const started = performance.now();
     const response = await fetch(`${this.config.INFERENCE_URL}/v1/embed/${path}`, {
@@ -175,10 +203,11 @@ export class SearchService {
     return value;
   }
 
-  private branch(source: MatchSource, query: string, vector: number[] | undefined, embedder: string | undefined, filter?: string, weight = 1, indexUid = this.indexUid()): SearchBranch {
+  private branch(source: MatchSource, query: string, vector: number[] | undefined, embedder: string | undefined, filter?: string, weight = 1, indexUid = this.indexUid(), captionProvider?: CaptionProvider): SearchBranch {
     return { source, weight, tier: "standard", query: {
       indexUid,
       q: query,
+      ...(query && captionProvider ? { attributesToSearchOn: [...COMMON_SEARCH_ATTRIBUTES, captionField(captionProvider)] } : {}),
       ...(vector ? { vector } : {}),
       ...(embedder ? { hybrid: { embedder, semanticRatio: 1 } } : {}),
       ...(filter ? { filter } : {}),
@@ -196,6 +225,7 @@ export class SearchService {
     const v2 = schema.v2;
     const generation = schema.generation;
     const visualModel = (await this.visualModelStatus()).active;
+    const captionProvider = (await this.captionProviderStatus()).active;
     if (visualModel !== "siglip2" && request.mode === "text_visual") throw new BadRequestException("Text Visual mode requires SigLIP 2; switch the active visual model in Admin");
     if (!v2 && (explicitFilters.origin?.length || explicitFilters.effect?.length)) {
       throw new BadRequestException("Origin and effect filters require a completed v2 full rebuild");
@@ -226,15 +256,15 @@ export class SearchService {
       visualText: visualTextEmbedding?.vectors[0],
       image: imageEmbedding?.vectors[0],
     };
-    let branches = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, preferredFilter, ranking, v2, visualModel, generation, indexUid);
+    let branches = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, preferredFilter, ranking, v2, visualModel, generation, indexUid, captionProvider);
     if (hasDerived) {
       const preferred = branches.map((branch) => ({ ...branch, tier: "preferred" as const, weight: branch.weight * 0.85 }));
-      const fallback = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, explicitFilter, ranking, v2, visualModel, generation, indexUid)
+      const fallback = this.buildBranches(request.mode, interpretation.lexicalQuery, vectors, explicitFilter, ranking, v2, visualModel, generation, indexUid, captionProvider)
         .map((branch) => ({ ...branch, tier: "fallback" as const, weight: branch.weight * 0.15 }));
       branches = [...preferred, ...fallback];
     }
     if (!branches.length) throw new BadRequestException("The selected mode is incompatible with the supplied query");
-    const offset = this.decodeCursor(request.cursor, visualModel, generation, indexUid);
+    const offset = this.decodeCursor(request.cursor, visualModel, generation, indexUid, captionProvider);
     const activeFacetKeys = v2 ? facetKeys : facetKeys.filter((key) => key !== "origin" && key !== "effect");
     const ranked = await this.executeBranches(branches, request.limit, offset);
     const facetResult = await this.loadFacets(branches[0]!.query, activeFacetKeys);
@@ -246,11 +276,12 @@ export class SearchService {
         const values = facetResult.facetDistribution?.[FACET_FIELD[key]] ?? {};
         return { key, values: Object.entries(values).map(([value, count]) => ({ value, count })), enabled: Object.keys(values).length > 0 };
       }),
-      nextCursor: hits.length === request.limit ? this.encodeCursor(offset + hits.length, visualModel, generation, indexUid) : null,
+      nextCursor: hits.length === request.limit ? this.encodeCursor(offset + hits.length, visualModel, generation, indexUid, captionProvider) : null,
       estimatedProductHits: facetResult.estimatedTotalHits ?? ranked.estimatedTotalHits ?? hits.length,
       processingTimeMs: performance.now() - started,
       timing: { inference: (semanticEmbedding?.milliseconds ?? 0) + (visualTextEmbedding?.milliseconds ?? 0) + (imageEmbedding?.milliseconds ?? 0), meilisearch: ranked.processingTimeMs },
       visualModel,
+      captionProvider,
     };
   }
 
@@ -292,12 +323,12 @@ export class SearchService {
     };
   }
 
-  private buildBranches(mode: string, query: string, vectors: { semantic?: number[]; visualText?: number[]; image?: number[] }, filter: string | undefined, ranking: RankingConfig, v2: boolean, visualModel: VisualModel = "siglip2", generation: VisualGeneration = "legacy", indexUid = this.config.MEILI_INDEX_UID): SearchBranch[] {
-    const semanticEmbedder = v2 ? "e5_text" : "siglip_text";
+  private buildBranches(mode: string, query: string, vectors: { semantic?: number[]; visualText?: number[]; image?: number[] }, filter: string | undefined, ranking: RankingConfig, v2: boolean, visualModel: VisualModel = "siglip2", generation: VisualGeneration = "legacy", indexUid = this.config.MEILI_INDEX_UID, captionProvider: CaptionProvider = "florence"): SearchBranch[] {
+    const semanticEmbedder = v2 ? captionEmbedder(captionProvider) : "siglip_text";
     const suffix = generation === "current" ? "_v2" : "";
     const imageEmbedder = `${visualModel === "siglip2" ? "siglip" : visualModel}_image${suffix}`;
     const siglipEmbedder = `siglip_image${suffix}`;
-    const branch = (source: MatchSource, text: string, vector?: number[], embedder?: string, branchFilter = filter, weight = 1) => this.branch(source, text, vector, embedder, branchFilter, weight, indexUid);
+    const branch = (source: MatchSource, text: string, vector?: number[], embedder?: string, branchFilter = filter, weight = 1) => this.branch(source, text, vector, embedder, branchFilter, weight, indexUid, v2 ? captionProvider : undefined);
     if (mode === "keyword") return query ? [branch("keyword", query)] : [];
     if (mode === "text_semantic") return vectors.semantic ? [branch("semantic", "", vectors.semantic, semanticEmbedder)] : [];
     if (mode === "text_hybrid") return [
@@ -364,14 +395,14 @@ export class SearchService {
     const { _rankingScore: _, _federation: __, _visualEmbeddingState: ___, ...document } = hit as MeiliHit & { _visualEmbeddingState?: unknown };
     return document;
   }
-  private encodeCursor(offset: number, visualModel: VisualModel, generation: VisualGeneration, indexUid: string): string { return Buffer.from(JSON.stringify({ v: 3, offset, visualModel, generation, indexUid }), "utf8").toString("base64url"); }
-  private decodeCursor(cursor: string | undefined, visualModel: VisualModel, generation: VisualGeneration, indexUid: string): number {
+  private encodeCursor(offset: number, visualModel: VisualModel, generation: VisualGeneration, indexUid: string, captionProvider: CaptionProvider = "florence"): string { return Buffer.from(JSON.stringify({ v: 4, offset, visualModel, generation, indexUid, captionProvider }), "utf8").toString("base64url"); }
+  private decodeCursor(cursor: string | undefined, visualModel: VisualModel, generation: VisualGeneration, indexUid: string, captionProvider: CaptionProvider = "florence"): number {
     if (!cursor) return 0;
     try {
       const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-      if (value.v !== 3 || !Number.isSafeInteger(value.offset) || value.offset < 0) throw new Error();
-      if (value.visualModel !== visualModel || value.generation !== generation || value.indexUid !== indexUid) {
-        throw new BadRequestException("The active visual model or index scope changed; run the search again instead of reusing this cursor");
+      if (value.v !== 4 || !Number.isSafeInteger(value.offset) || value.offset < 0) throw new Error();
+      if (value.visualModel !== visualModel || value.generation !== generation || value.indexUid !== indexUid || value.captionProvider !== captionProvider) {
+        throw new BadRequestException("The active visual model or index scope changed; the caption provider may also have changed. Run the search again instead of reusing this cursor");
       }
       return value.offset;
     } catch (error) {

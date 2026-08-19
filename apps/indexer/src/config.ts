@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { config as loadEnv } from "dotenv";
 import { isAbsolute, resolve } from "node:path";
-import { captionCacheKey } from "./caption-cache";
+import { captionCacheKey, qwenCaptionCacheKey } from "./caption-cache";
 
 const WORKSPACE_ROOT = resolve(__dirname, "../../..");
 loadEnv({ path: resolve(WORKSPACE_ROOT, ".env"), quiet: true });
@@ -19,6 +19,15 @@ const Schema = z.object({
   DINOV3_IMAGE_SIZE: z.coerce.number().int().min(224).max(512).refine((value) => value % 16 === 0, "DINOV3_IMAGE_SIZE must be a multiple of 16").default(384), DINOV3_POOLING: z.enum(["cls", "patch_mean", "cls_patch_mean"]).default("cls_patch_mean"),
   TEXT_EMBEDDING_DIMENSIONS: z.coerce.number().int().default(768), TEXT_EMBEDDING_MODEL_ID: z.string().default("intfloat/multilingual-e5-base"), TEXT_EMBEDDING_MODEL_REVISION: z.string().default("d128750597153bb5987e10b1c3493a34e5a4502a"),
   CAPTION_MODEL_ID: z.string().default("microsoft/Florence-2-base-ft"), CAPTION_MODEL_REVISION: z.string().default("f6c1a25888ffc1d945ee8a1a77ac833c7303d46e"), CAPTION_TASK: z.string().default("<DETAILED_CAPTION>"), CAPTION_MAX_NEW_TOKENS: z.coerce.number().int().positive().default(128), CAPTION_NUM_BEAMS: z.coerce.number().int().positive().default(3), MAX_CAPTION_BATCH: z.coerce.number().int().min(1).max(8).default(2),
+  CAPTION_INDEX_PROVIDER: z.enum(["florence", "qwen"]).default("florence"),
+  QWEN_CAPTION_MODEL_ID: z.string().default("unsloth/Qwen3.5-0.8B-GGUF:Q4_K_S"),
+  QWEN_CAPTION_MODEL_SHA256: z.string().regex(/^[a-f0-9]{64}$/i).default("5f7ccfa6e9df0d9ebbaff9ee095b18202bec1e0ac313ca688d2c57c9c80a6bc9"),
+  QWEN_CAPTION_MMPROJ_SHA256: z.string().regex(/^[a-f0-9]{64}$/i).default("56e4c6cfe73b0c82e3e82bc518d7591997e61d81f723fc41a586f4fa69ea2453"),
+  QWEN_CAPTION_PROMPT_VERSION: z.string().min(1).default("qwen-material-caption-v1"),
+  QWEN_CAPTION_PROMPT_SHA256: z.string().regex(/^[a-f0-9]{64}$/i).default("ca52f42df1545616283043810a8fa57f4cca7dabca957ec730ad63c68edb76db"),
+  QWEN_CAPTION_MAX_TOKENS: z.coerce.number().int().positive().default(160),
+  QWEN_CAPTION_SEED: z.coerce.number().int().default(42),
+  MAX_QWEN_CAPTION_BATCH: z.coerce.number().int().min(1).max(8).default(1),
   IMAGE_EMBEDDING_MODE: z.enum(["thumbnail", "all"]).default("thumbnail"),
   CATALOG_IMAGE_NORMALIZE_THRESHOLD_PIXELS: z.coerce.number().int().positive().default(25_000_000),
   CATALOG_IMAGE_MAX_SOURCE_PIXELS: z.coerce.number().int().positive().default(150_000_000),
@@ -32,6 +41,10 @@ const parsed = Schema.parse(process.env);
 if (parsed.CATALOG_IMAGE_MAX_SOURCE_PIXELS <= parsed.CATALOG_IMAGE_NORMALIZE_THRESHOLD_PIXELS) throw new Error("CATALOG_IMAGE_MAX_SOURCE_PIXELS must exceed CATALOG_IMAGE_NORMALIZE_THRESHOLD_PIXELS");
 if (parsed.CATALOG_IMAGE_MAX_SOURCE_BYTES <= parsed.CATALOG_IMAGE_MAX_OUTPUT_BYTES) throw new Error("CATALOG_IMAGE_MAX_SOURCE_BYTES must exceed CATALOG_IMAGE_MAX_OUTPUT_BYTES");
 const normalizationFingerprint = ["catalog-normalize-v1", parsed.CATALOG_IMAGE_NORMALIZE_THRESHOLD_PIXELS, parsed.CATALOG_IMAGE_MAX_SOURCE_PIXELS, parsed.CATALOG_IMAGE_MAX_SOURCE_BYTES, parsed.CATALOG_IMAGE_MAX_EDGE, parsed.CATALOG_IMAGE_MAX_OUTPUT_BYTES, "jpeg92-444-white"].join(":");
+const florenceCacheKey = captionCacheKey(parsed.CAPTION_TASK, parsed.CAPTION_MAX_NEW_TOKENS, parsed.CAPTION_NUM_BEAMS);
+const qwenCacheKey = qwenCaptionCacheKey(parsed.QWEN_CAPTION_PROMPT_VERSION, parsed.QWEN_CAPTION_MAX_TOKENS, parsed.QWEN_CAPTION_SEED, parsed.QWEN_CAPTION_MMPROJ_SHA256, parsed.QWEN_CAPTION_PROMPT_SHA256);
+const florenceFingerprint = ["caption-e5-v2", "florence", parsed.CAPTION_MODEL_ID, parsed.CAPTION_MODEL_REVISION, florenceCacheKey, parsed.TEXT_EMBEDDING_MODEL_ID, parsed.TEXT_EMBEDDING_MODEL_REVISION, parsed.TEXT_EMBEDDING_DIMENSIONS, normalizationFingerprint].join(":");
+const qwenFingerprint = ["caption-e5-v2", "qwen", parsed.QWEN_CAPTION_MODEL_ID, parsed.QWEN_CAPTION_MODEL_SHA256, qwenCacheKey, parsed.TEXT_EMBEDDING_MODEL_ID, parsed.TEXT_EMBEDDING_MODEL_REVISION, parsed.TEXT_EMBEDDING_DIMENSIONS, normalizationFingerprint].join(":");
 export const config = {
   ...parsed,
   STATE_DATABASE_PATH: isAbsolute(parsed.STATE_DATABASE_PATH) ? parsed.STATE_DATABASE_PATH : resolve(WORKSPACE_ROOT, parsed.STATE_DATABASE_PATH),
@@ -39,7 +52,9 @@ export const config = {
   SIGLIP_FINGERPRINT: [parsed.EMBEDDING_MODEL_ID, parsed.EMBEDDING_MODEL_REVISION, parsed.EMBEDDING_DIMENSIONS, parsed.SIGLIP_MAX_NUM_PATCHES, "adaptive_long_axis_v1", parsed.IMAGE_EMBEDDING_MODE, normalizationFingerprint].join(":"),
   DINOV2_FINGERPRINT: [parsed.DINOV2_MODEL_ID, parsed.DINOV2_MODEL_REVISION, parsed.DINOV2_DIMENSIONS, parsed.DINOV2_IMAGE_SIZE, parsed.DINOV2_POOLING, "adaptive_long_axis_v1", "l2", parsed.IMAGE_EMBEDDING_MODE, normalizationFingerprint].join(":"),
   DINOV3_FINGERPRINT: [parsed.DINOV3_MODEL_ID, parsed.DINOV3_ARCHIVE_SHA256, parsed.DINOV3_DIMENSIONS, parsed.DINOV3_IMAGE_SIZE, parsed.DINOV3_POOLING, "adaptive_long_axis_v1", "l2", parsed.IMAGE_EMBEDDING_MODE, normalizationFingerprint].join(":"),
-  CAPTION_BACKFILL_FINGERPRINT: ["caption-e5-v1", parsed.CAPTION_MODEL_ID, parsed.CAPTION_MODEL_REVISION, parsed.CAPTION_TASK, parsed.CAPTION_MAX_NEW_TOKENS, parsed.CAPTION_NUM_BEAMS, parsed.TEXT_EMBEDDING_MODEL_ID, parsed.TEXT_EMBEDDING_MODEL_REVISION, parsed.TEXT_EMBEDDING_DIMENSIONS, normalizationFingerprint].join(":"),
-  CAPTION_CACHE_KEY: captionCacheKey(parsed.CAPTION_TASK, parsed.CAPTION_MAX_NEW_TOKENS, parsed.CAPTION_NUM_BEAMS),
+  CAPTION_BACKFILL_FINGERPRINT: florenceFingerprint,
+  CAPTION_FINGERPRINTS: { florence: florenceFingerprint, qwen: qwenFingerprint },
+  CAPTION_CACHE_KEYS: { florence: florenceCacheKey, qwen: qwenCacheKey },
+  CAPTION_CACHE_KEY: florenceCacheKey,
 };
 export const redis = { host: config.REDIS_HOST, port: config.REDIS_PORT, db: config.REDIS_DB, username: config.REDIS_USERNAME, password: config.REDIS_PASSWORD, maxRetriesPerRequest: null };

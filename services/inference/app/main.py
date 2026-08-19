@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 
 from app.config import get_settings
 from app.models import (
+    CaptionProvider,
     CaptionRequest,
     CaptionResponse,
     CatalogEmbeddingResponse,
@@ -18,7 +19,7 @@ from app.provider import create_providers, decode_image, embed_catalog_images
 from app.scheduler import PriorityScheduler
 
 settings = get_settings()
-siglip, siglip_legacy, dinov2, dinov3, e5, florence = create_providers(settings)
+siglip, siglip_legacy, dinov2, dinov3, e5, florence, qwen = create_providers(settings)
 scheduler = PriorityScheduler()
 
 
@@ -55,6 +56,7 @@ async def health() -> HealthResponse:
             "dinov3": model_health(dinov3),
             "e5": model_health(e5),
             "florence": model_health(florence),
+            "qwen": model_health(qwen),
         },
     )
 
@@ -150,24 +152,31 @@ async def embed_catalog(request: ImageEmbeddingRequest) -> CatalogEmbeddingRespo
 
 @app.post("/v1/caption/images", response_model=CaptionResponse)
 async def caption_images(request: CaptionRequest) -> CaptionResponse:
-    if len(request.images) > settings.max_caption_batch:
+    provider = qwen if request.provider == CaptionProvider.qwen else florence
+    maximum = (
+        settings.max_qwen_caption_batch
+        if request.provider == CaptionProvider.qwen
+        else settings.max_caption_batch
+    )
+    if len(request.images) > maximum:
         raise HTTPException(
             status_code=422,
-            detail=f"caption batch exceeds {settings.max_caption_batch} images",
+            detail=f"caption batch exceeds {maximum} images for {request.provider.value}",
         )
     try:
         images = [decode_image(encoded, settings) for encoded in request.images]
         captions, queue_ms, inference_ms = await scheduler.submit(
-            request.priority, lambda: florence.caption_images(images)
+            request.priority, lambda: provider.caption_images(images)
         )
     except (ValueError, RuntimeError) as exc:
         raise request_error(exc) from exc
     return CaptionResponse(
         captions=captions,
-        task=florence.task,
-        model_id=florence.model_id,
-        model_revision=florence.resolved_revision or florence.configured_revision,
-        device=florence.device,
+        provider=request.provider,
+        task=provider.task,
+        model_id=provider.model_id,
+        model_revision=provider.resolved_revision or provider.configured_revision,
+        device=provider.device,
         queue_wait_ms=queue_ms,
         inference_ms=inference_ms,
     )

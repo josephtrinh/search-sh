@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import type { IndexRunMode, IndexRunSummary, IndexScope, RankingConfig, VisualGeneration, VisualModel, VisualModelStatus } from "@samplehub/contracts";
+import type { CaptionProvider, IndexRunMode, IndexRunSummary, IndexScope, RankingConfig, VisualGeneration, VisualModel, VisualModelStatus } from "@samplehub/contracts";
 import { defaultRankingConfig } from "@samplehub/contracts";
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
@@ -35,7 +35,7 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
         visual_eligible_products INTEGER NOT NULL DEFAULT 0,
         siglip_covered_products INTEGER NOT NULL DEFAULT 0, dinov2_covered_products INTEGER NOT NULL DEFAULT 0,
         dinov3_covered_products INTEGER NOT NULL DEFAULT 0, visual_coverage_threshold REAL, quality_warning TEXT,
-        config_fingerprint TEXT, visual_generation TEXT, product_limit INTEGER,
+        config_fingerprint TEXT, visual_generation TEXT, product_limit INTEGER, caption_provider TEXT, target_scope TEXT,
         started_at TEXT, finished_at TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE TABLE IF NOT EXISTS sync_watermarks (stream TEXT PRIMARY KEY, updated_at TEXT NOT NULL, entity_id TEXT NOT NULL, updated_on TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -83,6 +83,8 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     this.ensureColumn("index_runs", "dinov3_covered_products", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("index_runs", "visual_coverage_threshold", "REAL");
     this.ensureColumn("index_runs", "quality_warning", "TEXT");
+    this.ensureColumn("index_runs", "caption_provider", "TEXT");
+    this.ensureColumn("index_runs", "target_scope", "TEXT");
     this.expandIndexRunModes();
   }
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -106,7 +108,7 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
         visual_eligible_products INTEGER NOT NULL DEFAULT 0,
         siglip_covered_products INTEGER NOT NULL DEFAULT 0, dinov2_covered_products INTEGER NOT NULL DEFAULT 0,
         dinov3_covered_products INTEGER NOT NULL DEFAULT 0, visual_coverage_threshold REAL, quality_warning TEXT,
-        visual_generation TEXT, product_limit INTEGER,
+        visual_generation TEXT, product_limit INTEGER, caption_provider TEXT, target_scope TEXT,
         started_at TEXT, finished_at TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )`);
       this.db.exec(`INSERT INTO index_runs_next SELECT
@@ -115,7 +117,7 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
         dinov3_embedded_images,dinov3_failed_images,
         captioned_images,cached_captions,failed_captions,config_fingerprint,
         normalized_images,rejected_source_images,visual_eligible_products,siglip_covered_products,dinov2_covered_products,dinov3_covered_products,visual_coverage_threshold,quality_warning,
-        visual_generation,product_limit,
+        visual_generation,product_limit,NULL,NULL,
         started_at,finished_at,error,created_at FROM index_runs`);
       this.db.exec("DROP TABLE index_runs");
       this.db.exec("ALTER TABLE index_runs_next RENAME TO index_runs");
@@ -172,10 +174,10 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     const row = this.db.prepare("SELECT value_json FROM settings WHERE key='stable_visual_generation'").get() as { value_json?: string } | undefined;
     try { return row?.value_json && JSON.parse(row.value_json) === "current" ? "current" : "legacy"; } catch { return "legacy"; }
   }
-  createIndexRun(mode: IndexRunMode, configFingerprint?: string, options: { visualGeneration?: VisualGeneration; productLimit?: number } = {}): IndexRunSummary {
+  createIndexRun(mode: IndexRunMode, configFingerprint?: string, options: { visualGeneration?: VisualGeneration; productLimit?: number; captionProvider?: CaptionProvider; targetScope?: IndexScope } = {}): IndexRunSummary {
     const id = randomUUID();
-    this.db.prepare("INSERT INTO index_runs(id,mode,status,config_fingerprint,visual_generation,product_limit) VALUES(?,?,'queued',?,?,?)")
-      .run(id, mode, configFingerprint ?? null, options.visualGeneration ?? null, options.productLimit ?? null);
+    this.db.prepare("INSERT INTO index_runs(id,mode,status,config_fingerprint,visual_generation,product_limit,caption_provider,target_scope) VALUES(?,?,'queued',?,?,?,?,?)")
+      .run(id, mode, configFingerprint ?? null, options.visualGeneration ?? null, options.productLimit ?? null, options.captionProvider ?? null, options.targetScope ?? null);
     return this.getIndexRun(id)!;
   }
   getIndexRun(id: string): IndexRunSummary | null {
@@ -197,6 +199,8 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
     return { id: String(row.id), mode: row.mode as IndexRunMode, status: row.status as IndexRunSummary["status"],
       visualGeneration: row.visual_generation ? row.visual_generation as VisualGeneration : null,
       productLimit: row.product_limit === null || row.product_limit === undefined ? null : Number(row.product_limit),
+      captionProvider: row.caption_provider ? row.caption_provider as CaptionProvider : null,
+      targetScope: row.target_scope ? row.target_scope as IndexScope : null,
       processedProducts: Number(row.processed_products), totalProducts: Number(row.total_products),
       embeddedImages: Number(row.embedded_images), failedImages: Number(row.failed_images),
       siglipEmbeddedImages: Number(row.siglip_embedded_images), siglipFailedImages: Number(row.siglip_failed_images),
@@ -212,4 +216,19 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
       finishedAt: row.finished_at ? String(row.finished_at) : null, error: row.error ? String(row.error) : null };
   }
   raw(): Database.Database { return this.db; }
+  getSetting<T>(key: string): T | null {
+    const row = this.db.prepare("SELECT value_json FROM settings WHERE key=?").get(key) as { value_json?: string } | undefined;
+    if (!row?.value_json) return null;
+    try { return JSON.parse(row.value_json) as T; } catch { return null; }
+  }
+  setSetting(key: string, value: unknown): void {
+    this.db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP`).run(key, JSON.stringify(value));
+  }
+  getConfiguredCaptionProvider(): CaptionProvider {
+    return this.getSetting<CaptionProvider>("active_caption_provider") === "qwen" ? "qwen" : "florence";
+  }
+  setConfiguredCaptionProvider(provider: CaptionProvider): void {
+    this.setSetting("active_caption_provider", provider);
+  }
 }

@@ -4,12 +4,14 @@ import base64
 import hashlib
 import io
 import os
+import re
 import shutil
 import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import httpx
 import numpy as np
 from PIL import Image
 
@@ -226,16 +228,125 @@ class DeterministicEmbeddingProvider(ProviderMetadata):
 
 
 class DeterministicCaptionProvider(ProviderMetadata):
-    def __init__(self, settings: Settings):
-        self.model_id = "deterministic-caption-provider"
+    def __init__(self, settings: Settings, provider: str = "florence"):
+        self.model_id = f"deterministic-{provider}-caption-provider"
         self.configured_revision = "1"
         self.resolved_revision = "1"
         self.device = "cpu"
         self.loaded = True
-        self.task = settings.caption_task
+        self.task = (
+            settings.caption_task
+            if provider == "florence"
+            else settings.qwen_caption_prompt_version
+        )
 
     def caption_images(self, images: list[Image.Image]) -> list[str]:
         return [f"Test image with dimensions {image.width} by {image.height}." for image in images]
+
+
+NO_MATERIAL_SENTINEL = "<NO_MATERIAL>"
+QWEN_USER_PROMPT = (
+    "Describe the material surface according to the catalog-captioning instructions. "
+    "Return only the final caption."
+)
+
+
+def normalize_qwen_caption(value: str, max_characters: int = 1200) -> str | None:
+    text = re.sub(r"<think>.*?</think>", "", value, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"</?(?:pad|s|assistant|analysis|final)>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\|[^>]+\|>", "", text)
+    text = text.strip().strip('"\'').strip()
+    if text == NO_MATERIAL_SENTINEL:
+        return None
+    if (
+        not text
+        or len(text) > max_characters
+        or text.startswith(("{", "[", "#", "- ", "* "))
+        or "\n\n" in text
+    ):
+        raise ValueError("Qwen returned a malformed material caption")
+    return " ".join(text.split())
+
+
+class QwenCaptionProvider(ProviderMetadata):
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.model_id = settings.qwen_caption_model_id
+        self.configured_revision = settings.qwen_caption_model_sha256
+        self.resolved_revision = settings.qwen_caption_model_sha256
+        self.task = settings.qwen_caption_prompt_version
+        self.device = "llama-server"
+        self.loaded = False
+        prompt_path = resolve_workspace_path(settings.qwen_caption_prompt_path)
+        try:
+            self.system_prompt = prompt_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Qwen caption prompt was not found at {prompt_path}") from exc
+        actual_prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+        if actual_prompt_sha256 != settings.qwen_caption_prompt_sha256.lower():
+            raise RuntimeError(
+                "Qwen caption prompt checksum does not match QWEN_CAPTION_PROMPT_SHA256; "
+                "update the prompt version and checksum together"
+            )
+
+    @staticmethod
+    def _image_data_url(image: Image.Image) -> str:
+        target = io.BytesIO()
+        image.save(target, format="JPEG", quality=92, optimize=True)
+        return "data:image/jpeg;base64," + base64.b64encode(target.getvalue()).decode("ascii")
+
+    def _caption_image(self, image: Image.Image) -> str | None:
+        payload = {
+            "model": self.model_id,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": QWEN_USER_PROMPT},
+                        {"type": "image_url", "image_url": {"url": self._image_data_url(image)}},
+                    ],
+                },
+            ],
+            "temperature": 0,
+            "seed": self.settings.qwen_caption_seed,
+            "max_tokens": self.settings.qwen_caption_max_tokens,
+            "stream": False,
+            "reasoning_format": "none",
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        last_error: Exception | None = None
+        for _ in range(2):
+            try:
+                response = httpx.post(
+                    f"{self.settings.qwen_caption_url.rstrip('/')}/v1/chat/completions",
+                    json=payload,
+                    timeout=self.settings.qwen_caption_timeout_seconds,
+                )
+                response.raise_for_status()
+                body = response.json()
+                content = body["choices"][0]["message"]["content"]
+                if not isinstance(content, str):
+                    raise ValueError("Qwen response did not contain text content")
+                caption = normalize_qwen_caption(content)
+                self.loaded = True
+                return caption
+            except httpx.HTTPStatusError as exc:
+                detail = exc.response.text.strip()[:1000]
+                message = f"Qwen server returned HTTP {exc.response.status_code}: {detail or exc}"
+                last_error = (
+                    ValueError(message)
+                    if exc.response.status_code in {400, 413, 422}
+                    else RuntimeError(message)
+                )
+            except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+                last_error = exc
+        if isinstance(last_error, ValueError):
+            raise last_error
+        raise RuntimeError(f"Qwen caption server request failed: {last_error}") from last_error
+
+    def caption_images(self, images: list[Image.Image]) -> list[str | None]:
+        return [self._caption_image(image) for image in images]
 
 
 class SiglipProvider(ProviderMetadata):
@@ -573,13 +684,14 @@ class FlorenceProvider(ProviderMetadata):
                 text, task=self.task, image_size=(image.width, image.height)
             )
             caption = parsed.get(self.task, "") if isinstance(parsed, dict) else str(parsed)
-            captions.append(str(caption).strip())
+            captions.append(re.sub(r"(?:<pad>|</s>|<s>)", "", str(caption)).strip())
         return captions
 
 
 def create_providers(
     settings: Settings,
 ) -> tuple[
+    ProviderMetadata,
     ProviderMetadata,
     ProviderMetadata,
     ProviderMetadata,
@@ -597,6 +709,7 @@ def create_providers(
             DeterministicEmbeddingProvider(settings, "dinov3", settings.dinov3_dimensions),
             DeterministicEmbeddingProvider(settings, "e5", settings.text_embedding_dimensions),
             DeterministicCaptionProvider(settings),
+            DeterministicCaptionProvider(settings, "qwen"),
         )
     return (
         SiglipProvider(settings),
@@ -605,4 +718,5 @@ def create_providers(
         Dinov3Provider(settings),
         E5Provider(settings),
         FlorenceProvider(settings),
+        QwenCaptionProvider(settings),
     )

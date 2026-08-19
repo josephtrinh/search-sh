@@ -1,5 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
-import type { IndexRunMode, VisualGeneration } from "@samplehub/contracts";
+import type { CaptionProvider, IndexRunMode, IndexScope, VisualGeneration } from "@samplehub/contracts";
 import { IsIn, IsInt, IsOptional, Max, Min, ValidateIf } from "class-validator";
 
 export class StartIndexRunDto {
@@ -36,4 +36,16 @@ export class StartIndexRunDto {
   @Min(1)
   @Max(25000)
   declare productLimit?: number;
+
+  @ApiProperty({ enum: ["florence", "qwen"], required: false, default: "florence" })
+  @ValidateIf((value: StartIndexRunDto) => value.mode === "caption_backfill")
+  @IsOptional()
+  @IsIn(["florence", "qwen"])
+  declare captionProvider?: CaptionProvider;
+
+  @ApiProperty({ enum: ["stable", "preview_legacy", "preview_current"], required: false, default: "stable" })
+  @ValidateIf((value: StartIndexRunDto) => value.mode === "caption_backfill")
+  @IsOptional()
+  @IsIn(["stable", "preview_legacy", "preview_current"])
+  declare targetScope?: IndexScope;
 }

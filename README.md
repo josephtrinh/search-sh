@@ -1,6 +1,6 @@
 # SampleHub Multimodal Search
 
-A local-first monorepo for grouped SampleHub product search. It combines Meilisearch keyword retrieval, multilingual E5 text semantics, switchable SigLIP 2, DINOv2, or DINOv3 visual retrieval, and Florence 2 image captions without changing the source SampleHub database or object store.
+A local-first monorepo for grouped SampleHub product search. It combines Meilisearch keyword retrieval, multilingual E5 text semantics, switchable SigLIP 2, DINOv2, or DINOv3 visual retrieval, and switchable Florence 2 or Qwen 3.5 image captions without changing the source SampleHub database or object store.
 
 ## Workspace
 
@@ -20,6 +20,7 @@ A local-first monorepo for grouped SampleHub product search. It combines Meilise
 - Docker with Compose
 - read-only SampleHub MySQL and S3 credentials
 - at least 10 GB of free model/cache space when using the local DINOv3 ViT-B archive
+- `llama-server` from llama.cpp when generating Qwen captions (not required for search after backfill)
 
 Do not mix Node major versions after installing dependencies. `better-sqlite3` is a native module and must match the active Node ABI.
 
@@ -46,6 +47,15 @@ temp/facebookdinov3-vitb16-pretrain-lvd1689m-transformers-default-v1.tar.gz
 
 The inference service verifies the configured SHA-256 and safely extracts it into the gitignored `temp/dinov3-vitb16-pretrain-lvd1689m` directory when DINOv3 is first requested. Keep the archive intact for setup on another computer; neither the gated weights nor the extracted directory are committed to the repository.
 
+To install the optional Qwen caption model, install llama.cpp (for example, `brew install llama.cpp` on macOS), then download and verify the pinned Unsloth files:
+
+```bash
+pnpm qwen:download
+pnpm qwen:verify
+```
+
+This stores `Qwen3.5-0.8B-Q4_K_S.gguf` and `mmproj-F16.gguf` under the gitignored `temp/qwen3.5-0.8b/` directory and verifies both SHA-256 checksums. The vision projector is required; the language GGUF by itself cannot caption images.
+
 The shared workspace packages export compiled files from their ignored `dist` directories. `pnpm install` links those packages but does not compile them, and the filtered application `dev` commands below do not build them automatically. Build them before starting an application from a fresh clone.
 
 ## Subsequent development sessions
@@ -65,6 +75,16 @@ Start inference:
 pnpm inference:dev
 ```
 
+When generating or backfilling Qwen captions, also start its single-slot local server in another terminal:
+
+```bash
+pnpm qwen:dev
+```
+
+`pnpm qwen:dev` reads `QWEN_CONTEXT_SIZE` and `QWEN_IMAGE_MAX_TOKENS` from the root `.env`. The defaults are 8192 total context tokens and at most 4096 visual tokens per image. The image-token cap controls llama.cpp's dynamic-resolution vision encoding, not the source file's pixels or compressed size; catalog images have already passed the normalization limits described below.
+
+It binds only to `127.0.0.1:8200`, uses one parallel request and Metal offload, and applies the configured context and visual-token limits. Stop it after the Qwen backfill; searches use the stored caption and E5 vectors and do not call Qwen.
+
 Models load lazily, so `/health` can be healthy while its `loaded` fields are false. The first matching request downloads a pinned remote revision or loads the configured local archive:
 
 - SigLIP 2 for image and text-to-image embeddings
@@ -72,6 +92,7 @@ Models load lazily, so `/health` can be healthy while its `loaded` fields are fa
 - the local DINOv3 ViT-B/16 archive for the optional 768-dimensional image-only experiment
 - multilingual E5 Base for query and product-passage embeddings
 - Florence 2 Base FT for generated detailed captions
+- Qwen 3.5 0.8B Q4_K_S through llama.cpp for the optional catalog-specific captions
 
 Apple Silicon defaults to MPS when available. Set an individual backend to `cpu` if necessary. `INFERENCE_BACKEND=deterministic` starts a lightweight contract-only service; never use it to build a meaningful search index.
 
@@ -115,7 +136,7 @@ Auto text search extracts populated catalog attributes from the live facet vocab
 
 Current-generation catalog embeddings preserve the whole image and add square long-axis views only when its aspect ratio exceeds 1.2. Depending on length, two to four evenly spaced tiles are added, capped at five vectors per source image. SigLIP 2 uses the pinned NaFlex Base model with a 576-patch budget so the whole view keeps its native aspect ratio. DINOv2 uses 392×392 inputs and DINOv3 uses 384×384 inputs; both letterbox instead of stretching or center-cropping and use the normalized 50/50 CLS plus patch-mean descriptor. Interactive query images remain a single vector: native-aspect NaFlex for SigLIP and letterboxed for DINO.
 
-Florence always captions only that representative thumbnail/fallback image, even in `all` mode. Captions and provenance are cached in local SQLite by image content hash. They are searchable but are not displayed or returned as trusted product copy. On an existing v2 index, changing the caption model, revision, task, or generation settings can be applied with the dedicated caption backfill below. Changing image mode, vector dimensions, indexed fields, or index settings still requires a full rebuild.
+Both caption providers caption only that representative thumbnail/fallback image, even in `all` mode. Provider-specific captions and provenance are cached in local SQLite by image content hash. They are searchable but are not displayed or returned as trusted product copy. Florence uses `generatedVisualCaption` with `e5_text`; Qwen uses `generatedVisualCaptionQwen` with `e5_text_qwen`. The active pair can be switched instantly after both are ready for the selected index scope.
 
 ## First index or v2 migration
 
@@ -148,13 +169,17 @@ In `/admin`, choose a product limit from 1 through 25,000 and build a **legacy p
 
 Preview builds use their own shadow indexes and never replace stable, alter incremental watermarks, or affect shopper search until explicitly selected under **Search index scope**. Their minimum product coverage is 90%; completion below the 95% production target is shown as a warning. Products with no selected image are excluded from the denominator, and products with visual failures still retain structured text and E5 search. Only a completed, count-matched, image-gated, smoke-tested preview can be selected. Evaluation reports record the selected scope, visual generation, and visual model. Rebuilding a preview leaves its previous completed version searchable until the replacement succeeds.
 
-## Refresh captions and E5 without a full rebuild
+## Backfill and compare caption providers without a full rebuild
 
-After changing `CAPTION_TASK` or other Florence generation settings in `.env`, restart inference, API, and indexer, then click **Backfill captions + E5** in `/admin`. The `caption_backfill` run keeps the stable index searchable and does not invoke SigLIP, DINOv2, or DINOv3.
+After changing Florence settings or the versioned Qwen prompt/settings in `.env`, restart inference, API, and indexer. Start `pnpm qwen:dev` when Qwen generation is needed. In `/admin`, select the target **Search index scope**, then click **Backfill Florence** or **Backfill Qwen**. The backfill walks exactly the documents already in that stable or preview index, keeps it searchable, and does not invoke SigLIP, DINOv2, or DINOv3.
 
-For each product, the worker captions only the representative image, reuses cache entries matching the current image hash/model/revision/task/generation settings, rebuilds the E5 passage from catalog fields plus that caption, and replaces only `generatedVisualCaption` and `e5_text`. Every existing visual vector is copied back unchanged. Changing from `<DETAILED_CAPTION>` to `<MORE_DETAILED_CAPTION>` produces cache misses for the new task; completed new-task captions are reused after cancellation or failure.
+For each indexed product, the worker captions only the representative image, reuses cache entries matching the image hash plus the provider/model/prompt/generation fingerprint, rebuilds the E5 passage from catalog fields plus that provider's caption, and replaces only that provider's caption and E5 vector. Every other field and vector is copied back unchanged. Changing from `<DETAILED_CAPTION>` to `<MORE_DETAILED_CAPTION>` or changing Qwen's prompt requires a new `QWEN_CAPTION_PROMPT_VERSION` and matching `QWEN_CAPTION_PROMPT_SHA256`, producing intentional cache misses; completed work is reused after cancellation or failure.
 
-If an individual image cannot be downloaded or captioned, the existing indexed caption and E5 vector are preserved and the failure is reported for a later retry. Products without images are updated to a null generated caption and structured-text-only E5 vector. Schema, E5 service, document-count, missing-vector, and Meilisearch update failures stop the run because continuing would be unsafe. Successful batches are in-place and remain searchable if a later batch fails or the run is cancelled.
+If Qwen returns `<NO_MATERIAL>`, or a product has no usable representative image, its Qwen caption is null and it receives a structured-catalog-text-only E5 vector; there is no Florence fallback. An individual image failure preserves an existing successful provider value or creates the structured-only vector when that provider has no prior value. Systemic Qwen, E5, schema, or Meilisearch failures stop the run. A provider becomes selectable for that scope only after every indexed document has its vector, the count matches, and a semantic smoke query succeeds. Partial and cancelled runs retain cached progress but are not marked ready.
+
+Use **Active caption provider** in `/admin` to switch Florence/Qwen retrieval for the active scope. Keyword queries restrict `attributesToSearchOn` to trusted catalog fields plus only the active caption field, and semantic queries use only the matching E5 vector. Evaluation metadata and pagination cursors record the active caption provider.
+
+`CAPTION_INDEX_PROVIDER=florence` remains the default for full and incremental indexing. After approving Qwen on a preview and stable backfill, set it to `qwen` and restart the API/indexer for Qwen-only future indexing. A Qwen-only incremental run invalidates Florence readiness when it adds or updates products, preventing an incomplete Florence index from being selected. `llama-server` must be running for Qwen full/incremental generation, but not for normal search.
 
 ## Try DINOv2 or DINOv3 without replacing existing vectors
 

@@ -31,7 +31,7 @@ describe("StateService", () => {
     expect(service.getIndexRun("legacy-run")?.status).toBe("completed");
     expect(service.createIndexRun("visual_backfill", "test-fingerprint").mode).toBe("visual_backfill");
     expect(service.createIndexRun("dinov3_backfill", "test-dinov3-fingerprint").mode).toBe("dinov3_backfill");
-    expect(service.createIndexRun("caption_backfill", "test-caption-fingerprint").mode).toBe("caption_backfill");
+    expect(service.createIndexRun("caption_backfill", "test-caption-fingerprint", { captionProvider: "qwen", targetScope: "preview_current" })).toMatchObject({ mode: "caption_backfill", captionProvider: "qwen", targetScope: "preview_current" });
     expect(service.createIndexRun("limited_full", undefined, { visualGeneration: "current", productLimit: 10000 })).toMatchObject({ mode: "limited_full", visualGeneration: "current", productLimit: 10000 });
   });
   it("keeps SigLIP active until the current DINOv2 fingerprint is ready", () => {

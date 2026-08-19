@@ -19,6 +19,11 @@ class VisualModel(StrEnum):
     dinov3 = "dinov3"
 
 
+class CaptionProvider(StrEnum):
+    florence = "florence"
+    qwen = "qwen"
+
+
 class EmbeddingGeneration(StrEnum):
     legacy = "legacy"
     current = "current"
@@ -46,6 +51,7 @@ class ImageEmbeddingRequest(BaseModel):
 
 class CaptionRequest(BaseModel):
     images: list[str] = Field(min_length=1, max_length=8, description="Base64-encoded images")
+    provider: CaptionProvider = CaptionProvider.florence
     priority: Priority = Priority.indexing
 
 
@@ -70,7 +76,8 @@ class CatalogEmbeddingResponse(BaseModel):
 
 
 class CaptionResponse(BaseModel):
-    captions: list[str]
+    captions: list[str | None]
+    provider: CaptionProvider
     task: str
     model_id: str
     model_revision: str

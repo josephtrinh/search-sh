@@ -3,6 +3,7 @@ import { buildEmbeddingText, createGroupId, normalizeGroupPart } from "@samplehu
 import type { ProductDocument } from "@samplehub/contracts";
 import { InferenceClient, MeiliClient } from "./clients";
 import { config } from "./config";
+import { captionEmbedder } from "./caption-provider";
 
 async function main() {
   const uid = `products_smoke_${Date.now()}`;
@@ -18,16 +19,17 @@ async function main() {
       availability: null, width: 600, height: 10, length: 600, depth: null, area: null, updatedAt: new Date().toISOString(), thumbnailId: null, images: [], attributes: {},
     };
     const inference = new InferenceClient();
+    const textEmbedder = captionEmbedder(config.CAPTION_INDEX_PROVIDER);
     const textVector = (await inference.textPassages([buildEmbeddingText(product)]))[0]!;
     const siglipVector = (await inference.visualText(["grey stone tile"]))[0]!;
     const sampleImage = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=", "base64");
     const dinov2Vector = (await inference.images([sampleImage], "dinov2"))[0]!;
     const dinov3Vector = (await inference.images([sampleImage], "dinov3"))[0]!;
-    await meili.add(uid, [{ ...product, _vectors: { e5_text: textVector, siglip_image_v2: [siglipVector], dinov2_image_v2: [dinov2Vector], dinov3_image_v2: [dinov3Vector] } }]);
+    await meili.add(uid, [{ ...product, _vectors: { [textEmbedder]: textVector, siglip_image_v2: [siglipVector], dinov2_image_v2: [dinov2Vector], dinov3_image_v2: [dinov3Vector] } }]);
     const response = await fetch(`${config.MEILI_URL}/multi-search`, {
       method: "POST", headers: { Authorization: `Bearer ${config.MEILI_MASTER_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({ federation: { limit: 10, offset: 0, distinct: "groupId" }, queries: [
-        { indexUid: uid, q: "grey stone", vector: textVector, hybrid: { embedder: "e5_text", semanticRatio: .5 }, federationOptions: { weight: .5 } },
+        { indexUid: uid, q: "grey stone", vector: textVector, hybrid: { embedder: textEmbedder, semanticRatio: .5 }, federationOptions: { weight: .5 } },
         { indexUid: uid, q: "", vector: siglipVector, hybrid: { embedder: "siglip_image_v2", semanticRatio: 1 }, federationOptions: { weight: .5 } },
         { indexUid: uid, q: "", vector: dinov2Vector, hybrid: { embedder: "dinov2_image_v2", semanticRatio: 1 }, federationOptions: { weight: .5 } },
         { indexUid: uid, q: "", vector: dinov3Vector, hybrid: { embedder: "dinov3_image_v2", semanticRatio: 1 }, federationOptions: { weight: .5 } },

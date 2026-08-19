@@ -1,5 +1,5 @@
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import type { VisualGeneration, VisualModel } from "@samplehub/contracts";
+import type { CaptionProvider, ProductDocument, VisualGeneration, VisualModel } from "@samplehub/contracts";
 import { config } from "./config";
 import { CatalogImageError } from "./image-normalizer";
 import { generationFromEmbedders, visualEmbedder } from "./visual-generation";
@@ -32,8 +32,8 @@ export class InferenceClient {
     if (!response.ok) throw new InferenceHttpError("catalog-images", response.status, (await response.text()).slice(0, 500));
     return ((await response.json()) as { embedding_sets: number[][][] }).embedding_sets;
   }
-  async captions(images: Buffer[]): Promise<string[]> {
-    const response = await fetch(`${config.INFERENCE_URL}/v1/caption/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images: images.map((image) => image.toString("base64")), priority: 10 }) });
+  async captions(images: Buffer[], provider: CaptionProvider = "florence"): Promise<Array<string | null>> {
+    const response = await fetch(`${config.INFERENCE_URL}/v1/caption/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images: images.map((image) => image.toString("base64")), provider, priority: 10 }) });
     if (!response.ok) throw new InferenceHttpError("caption", response.status, (await response.text()).slice(0, 500));
     return ((await response.json()) as { captions: string[] }).captions;
   }
@@ -78,11 +78,12 @@ export class MeiliClient {
   async configure(uid: string, generation: VisualGeneration = "current") {
     const settings = {
       displayedAttributes: ["id","groupId","brand","normalizedBrand","series","normalizedSeries","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","price","availability","width","height","length","depth","area","updatedAt","thumbnailId","images","attributes","_visualEmbeddingState"],
-      searchableAttributes: ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","generatedVisualCaption","description","detail","remarks","attributes"],
+      searchableAttributes: ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","generatedVisualCaption","generatedVisualCaptionQwen","description","detail","remarks","attributes"],
       filterableAttributes: ["groupId","category","material","color","origin","effect","brand","series","model","surface","edge","sizeGroup","waterAbsorption","fireResistance","price","availability"],
       sortableAttributes: ["price"], pagination: { maxTotalHits: 10000 }, faceting: { maxValuesPerFacet: 100, sortFacetValuesBy: { "*": "count" } },
       embedders: {
         e5_text: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS },
+        ...(config.CAPTION_INDEX_PROVIDER === "qwen" ? { e5_text_qwen: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS } } : {}),
         [visualEmbedder("siglip2", generation)]: { source: "userProvided", dimensions: config.EMBEDDING_DIMENSIONS },
         [visualEmbedder("dinov2", generation)]: { source: "userProvided", dimensions: config.DINOV2_DIMENSIONS },
         [visualEmbedder("dinov3", generation)]: { source: "userProvided", dimensions: config.DINOV3_DIMENSIONS },
@@ -115,6 +116,24 @@ export class MeiliClient {
       [embedder]: { source: "userProvided", dimensions },
     })).taskUid);
   }
+  async ensureCaptionEmbedder(uid: string, provider: CaptionProvider) {
+    const settings = await this.request("GET", `/indexes/${uid}/settings/embedders`) as Record<string, { dimensions?: number } | undefined>;
+    const embedder = provider === "qwen" ? "e5_text_qwen" : "e5_text";
+    const field = provider === "qwen" ? "generatedVisualCaptionQwen" : "generatedVisualCaption";
+    const searchable = await this.request("GET", `/indexes/${uid}/settings/searchable-attributes`) as string[];
+    if (!searchable.includes(field)) {
+      await this.wait((await this.request("PUT", `/indexes/${uid}/settings/searchable-attributes`, [...searchable, field])).taskUid);
+    }
+    const current = settings[embedder];
+    if (current) {
+      if (current.dimensions !== config.TEXT_EMBEDDING_DIMENSIONS) throw new Error(`Existing ${embedder} embedder has ${current.dimensions ?? "unknown"} dimensions; expected ${config.TEXT_EMBEDDING_DIMENSIONS}`);
+      return;
+    }
+    await this.wait((await this.request("PATCH", `/indexes/${uid}/settings/embedders`, {
+      ...settings,
+      [embedder]: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS },
+    })).taskUid);
+  }
   async vectors(uid: string, ids: string[]): Promise<Map<string, { vectors: Record<string, unknown>; state?: Record<string, unknown> }>> {
     if (!ids.length) return new Map();
     const response = await this.request("POST", `/indexes/${uid}/documents/fetch`, { ids, fields: ["id", "_visualEmbeddingState"], retrieveVectors: true, limit: ids.length }) as { results?: Array<{ id: string; _vectors?: Record<string, unknown>; _visualEmbeddingState?: Record<string, unknown> }> };
@@ -126,6 +145,17 @@ export class MeiliClient {
     }) as { results?: Array<{ id: string; _vectors?: Record<string, unknown> }> };
     return (response.results ?? []).map((document) => ({ id: String(document.id), vectors: document._vectors ?? {} }));
   }
+  async documentPage(uid: string, offset: number, limit: number): Promise<Array<ProductDocument & { generatedVisualCaption?: string | null; generatedVisualCaptionQwen?: string | null; _vectors: Record<string, unknown> }>> {
+    const response = await this.request("POST", `/indexes/${uid}/documents/fetch`, {
+      offset, limit, retrieveVectors: true,
+    }) as { results?: Array<ProductDocument & { generatedVisualCaption?: string | null; generatedVisualCaptionQwen?: string | null; _vectors?: Record<string, unknown> }> };
+    return (response.results ?? []).map((document) => {
+      if (typeof document.id !== "string" || !Array.isArray(document.images)) {
+        throw new Error("Meilisearch caption backfill document is missing its id or images field; rebuild this index with the current document schema");
+      }
+      return { ...document, _vectors: document._vectors ?? {} };
+    });
+  }
   async updateVectors(uid: string, documents: Array<{ id: string; _vectors: Record<string, unknown>; _visualEmbeddingState?: Record<string, unknown> }>) {
     await this.updateDocuments(uid, documents);
   }
@@ -135,6 +165,7 @@ export class MeiliClient {
   async swap(first: string, second: string) { await this.wait((await this.request("POST", "/swap-indexes", [{ indexes: [first, second] }])).taskUid); }
   async deleteIndex(uid: string) { if (await this.exists(uid)) await this.wait((await this.request("DELETE", `/indexes/${uid}`)).taskUid); }
   async smoke(uid: string) { await this.request("POST", `/indexes/${uid}/search`, { q: "stone", limit: 1, distinct: "groupId" }); }
+  async semanticSmoke(uid: string, embedder: string, vector: number[]) { await this.request("POST", `/indexes/${uid}/search`, { vector, hybrid: { embedder, semanticRatio: 1 }, limit: 1 }); }
   private async wait(taskUid: number) {
     for (;;) { const task = await this.request("GET", `/tasks/${taskUid}`); if (task.status === "succeeded") return task; if (task.status === "failed" || task.status === "canceled") throw new Error(`Meilisearch task ${taskUid} ${task.status}: ${JSON.stringify(task.error)}`); await new Promise((resolve) => setTimeout(resolve, 150)); }
   }

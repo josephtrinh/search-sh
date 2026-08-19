@@ -36,6 +36,22 @@ class Settings(BaseSettings):
     caption_task: str = "<DETAILED_CAPTION>"
     caption_max_new_tokens: int = 128
     caption_num_beams: int = 3
+    qwen_caption_url: str = "http://127.0.0.1:8200"
+    qwen_caption_model_id: str = "unsloth/Qwen3.5-0.8B-GGUF:Q4_K_S"
+    qwen_caption_model_sha256: str = (
+        "5f7ccfa6e9df0d9ebbaff9ee095b18202bec1e0ac313ca688d2c57c9c80a6bc9"
+    )
+    qwen_caption_mmproj_sha256: str = (
+        "56e4c6cfe73b0c82e3e82bc518d7591997e61d81f723fc41a586f4fa69ea2453"
+    )
+    qwen_caption_prompt_path: str = "./services/inference/app/prompts/qwen-material-caption-v1.txt"
+    qwen_caption_prompt_version: str = "qwen-material-caption-v1"
+    qwen_caption_prompt_sha256: str = (
+        "ca52f42df1545616283043810a8fa57f4cca7dabca957ec730ad63c68edb76db"
+    )
+    qwen_caption_max_tokens: int = 160
+    qwen_caption_timeout_seconds: float = 120.0
+    qwen_caption_seed: int = 42
     inference_backend: str = "auto"
     siglip_backend: str | None = None
     dinov2_backend: str | None = None
@@ -47,6 +63,7 @@ class Settings(BaseSettings):
     max_text_batch: int = 32
     max_image_batch: int = 8
     max_caption_batch: int = 2
+    max_qwen_caption_batch: int = 1
 
     @field_validator("dinov2_image_size")
     @classmethod

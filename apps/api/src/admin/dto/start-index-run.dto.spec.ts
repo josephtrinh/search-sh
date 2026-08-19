@@ -9,6 +9,13 @@ describe("StartIndexRunDto", () => {
     await expect(validate(dto)).resolves.toHaveLength(0);
   });
 
+  it("accepts a provider-specific caption backfill scope", async () => {
+    const dto = Object.assign(new StartIndexRunDto(), {
+      mode: "caption_backfill", captionProvider: "qwen", targetScope: "preview_current",
+    });
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
   it("rejects an unknown run mode", async () => {
     const dto = Object.assign(new StartIndexRunDto(), { mode: "caption_only" });
     await expect(validate(dto)).resolves.not.toHaveLength(0);

@@ -44,6 +44,7 @@ export function mergeVisualVector(
 export function mergeTextVector(
   existing: Record<string, unknown>,
   value: number[],
+  embedder: "e5_text" | "e5_text_qwen" = "e5_text",
 ): Record<string, unknown> {
-  return { ...existing, e5_text: value };
+  return { ...existing, [embedder]: value };
 }

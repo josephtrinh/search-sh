@@ -10,7 +10,7 @@ SampleHub MySQL ─┐
 SampleHub S3 ────┘                   ├─> SigLIP 2 images ──────────┤
                                     ├─> DINOv2 images ────────────┼─> Meilisearch
                                     ├─> DINOv3 images ────────────┤
-                                    └─> Florence 2 captions ──────┘
+                                    └─> Florence/Qwen captions ──┘
                                                │                         ↑
                                                └─> SQLite cache          │
                                                                           │
@@ -31,7 +31,7 @@ deleted_at IS NULL AND COALESCE(is_private, 0) = 0 AND type = 'plan_product'
 
 One source product becomes one search document. `groupId` is the first 32 hex characters of SHA-256 over normalized `[series, brand]`. Results are distinct by group while facets remain product-level.
 
-Florence captions only the thumbnail-designated original image, falling back to the first ordered original. The caption is stored in the local cache with its image SHA-256, model ID/revision, task, generation settings, and timestamps. `generatedVisualCaption` is searchable in Meilisearch but excluded from displayed attributes and public product contracts.
+Florence and Qwen caption only the thumbnail-designated original image, falling back to the first ordered original. Provider-specific cache identity includes the image SHA-256, model files/revision, prompt/task, generation settings, and normalizer. Florence uses `generatedVisualCaption`/`e5_text`; Qwen uses `generatedVisualCaptionQwen`/`e5_text_qwen`. Both caption fields are searchable but excluded from displayed attributes and public product contracts.
 
 The E5 passage contains labeled public fields followed by the generated visual description and remaining source details. The inference service applies the required `passage:` prefix; query requests receive `query:`. Inputs are truncated to 512 tokens, average-pooled, and normalized.
 
@@ -77,7 +77,7 @@ Limited full runs deterministically hash source IDs with a fixed seed, so legacy
 
 The explicit `visual_backfill` and `dinov3_backfill` runs independently refresh DINOv2 or DINOv3 on a current-generation stable index without replacing it. Because Meilisearch validates all documents when a `userProvided` embedder is added, initialization first merges a null opt-out for the target embedder into every vector map, then registers it. Each update retrieves and verifies E5/SigLIP, preserves every other provider, and merges only the target DINO vector and its state. Same-fingerprint retries skip valid completed vector sets. Readiness is recorded independently only after every product is visited and product coverage reaches 95%. Legacy stable indexes reject these backfills.
 
-The explicit `caption_backfill` run also updates the stable index in place. It requires a count-matched v2 index, resolves each representative image through the content-addressed caption cache, regenerates the E5 passage, and merges only `e5_text` into the retrieved complete vector map. Per-product caption failures retain the old indexed caption and E5 vector; structural, E5-service, and Meilisearch failures stop the run. Successfully cached captions make a retry inexpensive relative to its first Florence pass.
+The explicit `caption_backfill` run updates the selected stable or preview index in place. It walks indexed documents, resolves representative images through the provider-specific cache, regenerates the matching E5 passage, and merges only that provider's caption/vector into the complete vector map. Per-product failures preserve an existing successful provider value or create structured-only E5 when none exists; structural, provider-service, E5, and Meilisearch failures stop the run. Readiness is recorded per provider and index UID only after complete vector coverage and a semantic smoke query.
 
 ## Local control data
 
