@@ -45,9 +45,9 @@ const ConfigSchema = z.object({
   QWEN_CAPTION_MODEL_ID: z.string().default("unsloth/Qwen3.5-0.8B-GGUF:Q4_K_S"),
   QWEN_CAPTION_MODEL_SHA256: z.string().regex(/^[a-f0-9]{64}$/i).default("5f7ccfa6e9df0d9ebbaff9ee095b18202bec1e0ac313ca688d2c57c9c80a6bc9"),
   QWEN_CAPTION_MMPROJ_SHA256: z.string().regex(/^[a-f0-9]{64}$/i).default("56e4c6cfe73b0c82e3e82bc518d7591997e61d81f723fc41a586f4fa69ea2453"),
-  QWEN_CAPTION_PROMPT_VERSION: z.string().min(1).default("qwen-material-caption-v1"),
-  QWEN_CAPTION_PROMPT_SHA256: z.string().regex(/^[a-f0-9]{64}$/i).default("ca52f42df1545616283043810a8fa57f4cca7dabca957ec730ad63c68edb76db"),
-  QWEN_CAPTION_MAX_TOKENS: z.coerce.number().int().positive().default(160),
+  QWEN_CAPTION_PROMPT_VERSION: z.string().min(1).default("qwen-material-caption-v2"),
+  QWEN_CAPTION_PROMPT_SHA256: z.string().regex(/^[a-f0-9]{64}$/i).default("8d4e7fb4e89b9dc205ca82153aeab9ff2be4ec3854ea4065b04fd788cec527ab"),
+  QWEN_CAPTION_MAX_TOKENS: z.coerce.number().int().positive().default(256),
   QWEN_CAPTION_SEED: z.coerce.number().int().default(42),
   IMAGE_EMBEDDING_MODE: z.enum(["thumbnail", "all"]).default("thumbnail"),
   CATALOG_IMAGE_NORMALIZE_THRESHOLD_PIXELS: z.coerce.number().int().positive().default(25_000_000),
@@ -73,7 +73,7 @@ export function getConfig(): AppConfig {
     if (parsed.CATALOG_IMAGE_MAX_SOURCE_BYTES <= parsed.CATALOG_IMAGE_MAX_OUTPUT_BYTES) throw new Error("CATALOG_IMAGE_MAX_SOURCE_BYTES must exceed CATALOG_IMAGE_MAX_OUTPUT_BYTES");
     const normalizationFingerprint = ["catalog-normalize-v1", parsed.CATALOG_IMAGE_NORMALIZE_THRESHOLD_PIXELS, parsed.CATALOG_IMAGE_MAX_SOURCE_PIXELS, parsed.CATALOG_IMAGE_MAX_SOURCE_BYTES, parsed.CATALOG_IMAGE_MAX_EDGE, parsed.CATALOG_IMAGE_MAX_OUTPUT_BYTES, "jpeg92-444-white"].join(":");
     const florenceCacheKey = JSON.stringify({ task: parsed.CAPTION_TASK, maxNewTokens: parsed.CAPTION_MAX_NEW_TOKENS, numBeams: parsed.CAPTION_NUM_BEAMS });
-    const qwenCacheKey = JSON.stringify({ promptVersion: parsed.QWEN_CAPTION_PROMPT_VERSION, maxTokens: parsed.QWEN_CAPTION_MAX_TOKENS, seed: parsed.QWEN_CAPTION_SEED, mmprojSha256: parsed.QWEN_CAPTION_MMPROJ_SHA256, promptSha256: parsed.QWEN_CAPTION_PROMPT_SHA256, temperature: 0, reasoning: false, userPrompt: "qwen-user-prompt-v1", normalizer: "qwen-caption-v1" });
+    const qwenCacheKey = JSON.stringify({ promptVersion: parsed.QWEN_CAPTION_PROMPT_VERSION, maxTokens: parsed.QWEN_CAPTION_MAX_TOKENS, seed: parsed.QWEN_CAPTION_SEED, mmprojSha256: parsed.QWEN_CAPTION_MMPROJ_SHA256, promptSha256: parsed.QWEN_CAPTION_PROMPT_SHA256, temperature: 0, reasoning: false, userPrompt: "qwen-user-prompt-v2", normalizer: "qwen-caption-v2" });
     const florenceFingerprint = ["caption-e5-v2", "florence", parsed.CAPTION_MODEL_ID, parsed.CAPTION_MODEL_REVISION, florenceCacheKey, parsed.TEXT_EMBEDDING_MODEL_ID, parsed.TEXT_EMBEDDING_MODEL_REVISION, parsed.TEXT_EMBEDDING_DIMENSIONS, normalizationFingerprint].join(":");
     const qwenFingerprint = ["caption-e5-v2", "qwen", parsed.QWEN_CAPTION_MODEL_ID, parsed.QWEN_CAPTION_MODEL_SHA256, qwenCacheKey, parsed.TEXT_EMBEDDING_MODEL_ID, parsed.TEXT_EMBEDDING_MODEL_REVISION, parsed.TEXT_EMBEDDING_DIMENSIONS, normalizationFingerprint].join(":");
     cached = {

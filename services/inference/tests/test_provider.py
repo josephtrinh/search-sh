@@ -46,14 +46,19 @@ def test_embeddings_are_deterministic_and_normalized():
 
 
 def test_qwen_caption_normalizer_handles_reasoning_and_no_material():
-    value = '<think>hidden</think> "Warm grey surface with fine speckles."'
-    assert normalize_qwen_caption(value) == "Warm grey surface with fine speckles."
+    value = (
+        '<think>hidden</think> "Warm grey surface with fine speckles.\n\n'
+        'Soft diagonal movement remains visible."'
+    )
+    assert normalize_qwen_caption(value) == (
+        "Warm grey surface with fine speckles. Soft diagonal movement remains visible."
+    )
     assert normalize_qwen_caption("<NO_MATERIAL>") is None
-    with pytest.raises(ValueError, match="malformed"):
+    with pytest.raises(ValueError, match="structured or list output.*not allowed"):
         normalize_qwen_caption('{"caption":"not allowed"}')
 
 
-def test_qwen_caption_retries_malformed_output(monkeypatch):
+def test_qwen_caption_does_not_retry_deterministic_malformed_output(monkeypatch):
     calls = []
 
     class Response:
@@ -62,19 +67,13 @@ def test_qwen_caption_retries_malformed_output(monkeypatch):
 
         def json(self):
             calls.append(1)
-            content = (
-                "- invalid list"
-                if len(calls) == 1
-                else "Cream surface with subtle linear veining."
-            )
-            return {"choices": [{"message": {"content": content}}]}
+            return {"choices": [{"message": {"content": "- invalid list"}}]}
 
     monkeypatch.setattr("app.provider.httpx.post", lambda *_args, **_kwargs: Response())
     provider = QwenCaptionProvider(Settings())
-    assert provider.caption_images([Image.new("RGB", (8, 6))]) == [
-        "Cream surface with subtle linear veining."
-    ]
-    assert len(calls) == 2
+    with pytest.raises(ValueError, match="structured or list output.*invalid list"):
+        provider.caption_images([Image.new("RGB", (8, 6))])
+    assert len(calls) == 1
 
 
 def test_qwen_request_rejection_is_reported_as_an_input_error(monkeypatch):

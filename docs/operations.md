@@ -71,6 +71,10 @@ After changing a provider's task, prompt version, model fingerprint, or generati
 
 The Qwen launcher reads `QWEN_CONTEXT_SIZE` and `QWEN_IMAGE_MAX_TOKENS` from the root `.env` and defaults to 8192 and 4096 respectively. Context must accommodate the system/user prompts, visual tokens, and generated caption. The image-token setting caps llama.cpp's dynamic-resolution vision representation after catalog-image normalization; it is not a raw pixel or byte limit.
 
+Qwen caption generation currently allows 256 output tokens. Paragraph whitespace is normalized rather than treated as a failure. Rejected output records the specific validation reason and a sanitized excerpt, while deterministic malformed output is not retried with the identical request.
+
+Run `pnpm --filter @samplehub/indexer qwen:sample` before a large Qwen backfill. It selects a deterministic sample of 30 unique image-bearing products from `preview_current`, reads and normalizes those images, and reports caption compliance without mutating Meilisearch or SQLite. Set `QWEN_SAMPLE_SIZE` from 1 through 100 or `QWEN_SAMPLE_SCOPE=stable|preview_legacy|preview_current` to override those defaults.
+
 The current image hash, caption model/revision, task, token limit, and beam count select the SQLite cache entry. A new task such as `<MORE_DETAILED_CAPTION>` therefore generates new captions, while a retry reuses successful entries. Products without images receive a null generated caption and an E5 passage built from structured catalog text alone.
 
 An individual S3, invalid-image, or empty-caption failure preserves that product's existing caption and E5 vector, increments the caption-failure count, and lets the sweep continue. A schema/count mismatch, missing existing E5 or SigLIP vectors, E5 service error, or Meilisearch update failure stops the run. Successful batches remain applied after cancellation or failure; rerun the same mode to reuse cached captions and retry unsuccessful products.

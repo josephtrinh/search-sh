@@ -138,6 +138,10 @@ Current-generation catalog embeddings preserve the whole image and add square lo
 
 Both caption providers caption only that representative thumbnail/fallback image, even in `all` mode. Provider-specific captions and provenance are cached in local SQLite by image content hash. They are searchable but are not displayed or returned as trusted product copy. Florence uses `generatedVisualCaption` with `e5_text`; Qwen uses `generatedVisualCaptionQwen` with `e5_text_qwen`. The active pair can be switched instantly after both are ready for the selected index scope.
 
+The Qwen v2 material prompt excludes application suggestions and allows up to 256 generated tokens. Its normalizer removes hidden reasoning tags, collapses whitespace and paragraph breaks into one searchable paragraph, and reports a bounded output excerpt plus the exact validation reason when output is rejected. Deterministic malformed responses and input-related HTTP errors are not retried unchanged; transient transport and server failures retain one retry.
+
+Before a large Qwen backfill, run the read-only deterministic 30-product check against the current preview with `pnpm --filter @samplehub/indexer qwen:sample`. Override the size with `QWEN_SAMPLE_SIZE` (1–100) or the scope with `QWEN_SAMPLE_SCOPE=stable|preview_legacy|preview_current`. It reads catalog images and calls inference but does not update indexes or caption caches.
+
 ## First index or v2 migration
 
 With infrastructure and inference running:

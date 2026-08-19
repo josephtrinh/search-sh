@@ -21,7 +21,7 @@ export function qwenCaptionCacheKey(
     promptSha256,
     temperature: 0,
     reasoning: false,
-    userPrompt: "qwen-user-prompt-v1",
-    normalizer: "qwen-caption-v1",
+    userPrompt: "qwen-user-prompt-v2",
+    normalizer: "qwen-caption-v2",
   });
 }

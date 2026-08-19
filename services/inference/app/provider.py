@@ -246,26 +246,35 @@ class DeterministicCaptionProvider(ProviderMetadata):
 
 NO_MATERIAL_SENTINEL = "<NO_MATERIAL>"
 QWEN_USER_PROMPT = (
-    "Describe the material surface according to the catalog-captioning instructions. "
+    "Describe the visible material surface directly according to the catalog-captioning "
+    "instructions. Begin with its colors and pattern, never with a reference to the image. "
     "Return only the final caption."
 )
 
 
-def normalize_qwen_caption(value: str, max_characters: int = 1200) -> str | None:
+def _invalid_qwen_caption(reason: str, value: str) -> ValueError:
+    excerpt = " ".join(value.split())
+    if len(excerpt) > 240:
+        excerpt = excerpt[:237] + "..."
+    return ValueError(
+        f"Qwen returned an invalid material caption ({reason}); output excerpt: {excerpt!r}"
+    )
+
+
+def normalize_qwen_caption(value: str, max_characters: int = 2400) -> str | None:
     text = re.sub(r"<think>.*?</think>", "", value, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"</?(?:pad|s|assistant|analysis|final)>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"<\|[^>]+\|>", "", text)
-    text = text.strip().strip('"\'').strip()
+    text = " ".join(text.strip().strip("\"'").strip().split())
     if text == NO_MATERIAL_SENTINEL:
         return None
-    if (
-        not text
-        or len(text) > max_characters
-        or text.startswith(("{", "[", "#", "- ", "* "))
-        or "\n\n" in text
-    ):
-        raise ValueError("Qwen returned a malformed material caption")
-    return " ".join(text.split())
+    if not text:
+        raise _invalid_qwen_caption("empty output", value)
+    if len(text) > max_characters:
+        raise _invalid_qwen_caption(f"more than {max_characters} normalized characters", text)
+    if text.startswith(("{", "[", "#", "- ", "* ")):
+        raise _invalid_qwen_caption("structured or list output", text)
+    return text
 
 
 class QwenCaptionProvider(ProviderMetadata):
@@ -334,15 +343,13 @@ class QwenCaptionProvider(ProviderMetadata):
             except httpx.HTTPStatusError as exc:
                 detail = exc.response.text.strip()[:1000]
                 message = f"Qwen server returned HTTP {exc.response.status_code}: {detail or exc}"
-                last_error = (
-                    ValueError(message)
-                    if exc.response.status_code in {400, 413, 422}
-                    else RuntimeError(message)
-                )
-            except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+                if exc.response.status_code in {400, 413, 422}:
+                    raise ValueError(message) from exc
+                last_error = RuntimeError(message)
+            except httpx.HTTPError as exc:
                 last_error = exc
-        if isinstance(last_error, ValueError):
-            raise last_error
+            except (KeyError, IndexError, TypeError) as exc:
+                raise ValueError("Qwen response did not contain valid caption text") from exc
         raise RuntimeError(f"Qwen caption server request failed: {last_error}") from last_error
 
     def caption_images(self, images: list[Image.Image]) -> list[str | None]:

@@ -44,12 +44,12 @@ class Settings(BaseSettings):
     qwen_caption_mmproj_sha256: str = (
         "56e4c6cfe73b0c82e3e82bc518d7591997e61d81f723fc41a586f4fa69ea2453"
     )
-    qwen_caption_prompt_path: str = "./services/inference/app/prompts/qwen-material-caption-v1.txt"
-    qwen_caption_prompt_version: str = "qwen-material-caption-v1"
+    qwen_caption_prompt_path: str = "./services/inference/app/prompts/qwen-material-caption-v2.txt"
+    qwen_caption_prompt_version: str = "qwen-material-caption-v2"
     qwen_caption_prompt_sha256: str = (
-        "ca52f42df1545616283043810a8fa57f4cca7dabca957ec730ad63c68edb76db"
+        "8d4e7fb4e89b9dc205ca82153aeab9ff2be4ec3854ea4065b04fd788cec527ab"
     )
-    qwen_caption_max_tokens: int = 160
+    qwen_caption_max_tokens: int = 256
     qwen_caption_timeout_seconds: float = 120.0
     qwen_caption_seed: int = 42
     inference_backend: str = "auto"
