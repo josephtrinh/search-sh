@@ -56,4 +56,47 @@ No actionable P0, P1, or P2 differences remain. The component-level differences 
 
 - P3: a short crop-help tooltip could be added later if internal testers need onboarding for wheel zoom and image panning.
 
-final result: passed
+prior task result: passed
+
+---
+
+# Design QA — Frontend Model Switcher and Sticky Search
+
+## Evidence
+
+- Source visual truth: the user-provided 1566 × 623 px composite screenshot in the current conversation. The attachment is not exposed as a local filesystem path.
+- Source state: Discover uses the current preview, DINOv3 is active, the desktop results grid has four columns, and the highlighted search panel sits below a non-sticky header.
+- Implementation screenshot: unavailable.
+- Implementation viewport: unavailable; the requested desktop layout was implemented against the existing Discover breakpoint and the source screenshot.
+- CSS size/density normalization: unavailable without an implementation capture.
+
+## Static implementation review
+
+- The model selector is part of the existing search mode row and uses the same three labels and readiness state as Admin.
+- Selecting a model updates the shared API state, protects unavailable models, moves an incompatible Text Visual search to Auto, and reruns visible results with the new model.
+- The site header now scrolls normally. The complete search panel becomes sticky with a 10 px top gap on desktop and returns to normal document flow below the 1000 px breakpoint so the crop interface cannot monopolize a small viewport.
+- The panel retains its opaque card surface before scrolling. Once stuck, its background changes to 35% white with a 14 px backdrop blur; controls and reference imagery remain fully opaque and readable.
+- The implementation preserves the existing design tokens, button treatment, spacing, and typography.
+
+## Interaction and API verification
+
+- TypeScript check: passed.
+- Production web build: passed.
+- Discover route response: passed with HTTP 200.
+- Shared model endpoint: passed; the test state was restored to DINOv3, with SigLIP2, DINOv2, and DINOv3 reported ready.
+- Browser-rendered interaction test: blocked.
+- Browser console inspection: blocked.
+
+## Sticky-surface follow-up
+
+- Source visual truth: the latest user-provided scrolled Discover screenshot highlighting the search panel's contact with the top viewport edge and its large opaque surface.
+- Implemented target: 10 px visible clearance above the stuck card and a translucent background only while the sticky constraint is active.
+- TypeScript check and stylesheet validation: passed.
+- Matching-viewport screenshot and visual comparison: blocked by the browser connection issue below.
+
+## Findings
+
+- Blocked: the required in-app browser runtime could not initialize because its bundled client imports `node:process`, which the available `node_repl` runtime rejected. As a result, I could not capture the implementation at the matching viewport, create the required side-by-side visual comparison, exercise the controls in-browser, or inspect the browser console.
+- No P0, P1, or P2 issues were found in static code review or build/API verification, but those checks do not substitute for browser visual QA.
+
+final result: blocked

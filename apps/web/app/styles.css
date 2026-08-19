@@ -41,12 +41,10 @@ input {
   align-items: center;
   justify-content: space-between;
   padding: 0 max(24px, calc((100vw - 1440px) / 2));
-  border-bottom: 1px solid var(--line);
+  /*border-bottom: 1px solid var(--line);*/
   background: rgba(255, 255, 255, 0.94);
-  position: sticky;
-  top: 0;
-  backdrop-filter: blur(18px);
-  z-index: 10;
+  position: relative;
+  z-index: 1;
 }
 .brand {
   display: flex;
@@ -121,10 +119,21 @@ footer {
   gap: 18px;
   background: var(--card);
   padding: 24px;
-  border: 1px solid var(--line);
+  /*border: 1px solid var(--line);*/
   border-radius: 16px;
   color: var(--ink);
   box-shadow: 0 12px 32px rgba(18, 21, 23, 0.07);
+  position: sticky;
+  top: 10px;
+  z-index: 10;
+  transition:
+    background-color 160ms ease,
+    backdrop-filter 160ms ease;
+}
+.query-panel.is-stuck {
+  background: rgba(255, 255, 255, 0.35);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
 }
 .query-main label {
   font-size: 12px;
@@ -183,9 +192,39 @@ footer {
   font-size: 12px;
   margin-right: 4px;
 }
-.mode-row .visual-model-label {
+.model-switch {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 10px;
+}
+.model-switch > span {
+  margin-right: 3px;
   color: var(--muted);
+  font-size: 12px;
+}
+.model-option {
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--muted);
+  padding: 6px 9px;
+  border-radius: 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.model-option:hover:not(:disabled) {
+  border-color: #9fa6ad;
+  color: var(--ink);
+}
+.model-option.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: white;
+}
+.model-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 .chip {
   border: 1px solid var(--line);
@@ -597,7 +636,7 @@ footer {
 }
 .product-card {
   background: var(--card);
-  border: 1px solid var(--line);
+  /*border: 1px solid var(--line);*/
   border-radius: 14px;
   overflow: hidden;
   transition:
@@ -962,6 +1001,7 @@ footer {
   }
   .query-panel {
     grid-template-columns: 1fr;
+    position: static;
   }
   .image-drop {
     height: 180px;
@@ -1006,6 +1046,11 @@ footer {
   }
   .search-row button {
     padding: 14px;
+  }
+  .model-switch {
+    width: 100%;
+    margin-left: 0;
+    padding: 4px 0 0;
   }
   .admin-hero h1 {
     font-size: 44px;

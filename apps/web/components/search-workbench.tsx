@@ -60,8 +60,14 @@ export function SearchWorkbench() {
   const [selected, setSelected] = useState<Filters>({});
   const [mode, setMode] = useState("auto");
   const [visualModel, setVisualModel] = useState<VisualModel>("siglip2");
+  const [visualStatus, setVisualStatus] = useState<VisualModelStatus | null>(
+    null,
+  );
+  const [switchingModel, setSwitchingModel] = useState(false);
+  const [searchPanelStuck, setSearchPanelStuck] = useState(false);
   const [searching, setSearching] = useState(false);
   const requestRef = useRef(0);
+  const queryPanelRef = useRef<HTMLFormElement>(null);
   const autoSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestStateRef = useRef<SearchSnapshot>({
     query,
@@ -79,6 +85,7 @@ export function SearchWorkbench() {
       )
       .then((status) => {
         if (!status) return;
+        setVisualStatus(status);
         setVisualModel(status.active);
         if (status.active !== "siglip2")
           setMode((current) => (current === "text_visual" ? "auto" : current));
@@ -102,6 +109,26 @@ export function SearchWorkbench() {
     },
     [],
   );
+
+  useEffect(() => {
+    const updateStickyState = () => {
+      const panel = queryPanelRef.current;
+      const compactLayout = window.matchMedia("(max-width: 1000px)").matches;
+      setSearchPanelStuck(
+        Boolean(
+          panel && !compactLayout && panel.getBoundingClientRect().top <= 10,
+        ),
+      );
+    };
+
+    updateStickyState();
+    window.addEventListener("scroll", updateStickyState, { passive: true });
+    window.addEventListener("resize", updateStickyState);
+    return () => {
+      window.removeEventListener("scroll", updateStickyState);
+      window.removeEventListener("resize", updateStickyState);
+    };
+  }, []);
 
   function cancelAutoSearch() {
     if (!autoSearchTimerRef.current) return;
@@ -156,6 +183,9 @@ export function SearchWorkbench() {
       const next = (await response.json()) as SearchResponse;
       if (requestId !== requestRef.current) return;
       setVisualModel(next.visualModel);
+      setVisualStatus((current) =>
+        current ? { ...current, active: next.visualModel } : current,
+      );
       setResult((previous) => {
         if (!cursor || !previous) return next;
         const hits = [...previous.hits, ...next.hits].filter(
@@ -213,6 +243,48 @@ export function SearchWorkbench() {
     void run();
   }
 
+  async function selectVisualModel(model: VisualModel) {
+    if (model === visualModel || switchingModel) return;
+    cancelAutoSearch();
+    requestRef.current += 1;
+    setSearching(false);
+    setSwitchingModel(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API}/admin/visual-model`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          message?: string | string[];
+        } | null;
+        const message = Array.isArray(body?.message)
+          ? body.message.join(", ")
+          : body?.message;
+        throw new Error(message ?? "Unable to switch visual model");
+      }
+      const status = (await response.json()) as VisualModelStatus;
+      const nextMode =
+        status.active === "siglip2" || mode !== "text_visual" ? mode : "auto";
+      setVisualStatus(status);
+      setVisualModel(status.active);
+      setMode(nextMode);
+      if (result) {
+        await run({ snapshot: { ...latestStateRef.current, mode: nextMode } });
+      }
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to switch visual model",
+      );
+    } finally {
+      setSwitchingModel(false);
+    }
+  }
+
   function toggle(key: string, value: string) {
     const values = selected[key] ?? [];
     const nextValues = values.includes(value)
@@ -247,7 +319,8 @@ export function SearchWorkbench() {
   return (
     <section className="workbench">
       <form
-        className={image ? "query-panel has-reference" : "query-panel"}
+        ref={queryPanelRef}
+        className={`query-panel${image ? " has-reference" : ""}${searchPanelStuck ? " is-stuck" : ""}`}
         onSubmit={submit}
       >
         <div className="query-main">
@@ -292,9 +365,47 @@ export function SearchWorkbench() {
                 </button>
               );
             })}
-            <span className="visual-model-label">
-              Visual: {visualModel === "dinov2" ? "DINOv2" : visualModel === "dinov3" ? "DINOv3" : "SigLIP 2"}
-            </span>
+            <div
+              className="model-switch"
+              role="group"
+              aria-label="Active visual model"
+            >
+              <span>Visual</span>
+              {(["siglip2", "dinov2", "dinov3"] as const).map((model) => {
+                const ready =
+                  model === "siglip2" ||
+                  (model === "dinov2"
+                    ? visualStatus?.dinov2Ready
+                    : visualStatus?.dinov3Ready);
+                const label =
+                  model === "siglip2"
+                    ? "SigLIP 2"
+                    : model === "dinov2"
+                      ? "DINOv2"
+                      : "DINOv3";
+                return (
+                  <button
+                    type="button"
+                    className={
+                      visualModel === model
+                        ? "model-option active"
+                        : "model-option"
+                    }
+                    aria-pressed={visualModel === model}
+                    disabled={switchingModel || !ready}
+                    title={
+                      ready
+                        ? `Use ${label}`
+                        : `${label} is not ready for this index`
+                    }
+                    onClick={() => void selectVisualModel(model)}
+                    key={model}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
         <ImageCropDropzone
