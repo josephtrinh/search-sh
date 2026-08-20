@@ -12,11 +12,11 @@ interface SearchBranch { source: MatchSource; weight: number; tier: "standard" |
 interface RankedHit { hit: MeiliHit; matchSources: MatchSource[]; primaryMatchSource: MatchSource; }
 
 const FACET_FIELD: Record<FacetKey, string> = {
-  category: "category", material: "material", color: "color", origin: "origin", effect: "effect", brand: "brand", series: "series",
+  material: "material", color: "color", origin: "origin", effect: "effect", brand: "brand", series: "series",
   model: "model", surface: "surface", edge: "edge", sizeGroup: "sizeGroup", waterAbsorption: "waterAbsorption",
-  fireResistance: "fireResistance", price: "price", availability: "availability",
+  fireResistance: "fireResistance",
 };
-const COMMON_SEARCH_ATTRIBUTES = ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","attributes"];
+const COMMON_SEARCH_ATTRIBUTES = ["brand","series","name","sku","model","item","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","remarks","attributes"];
 const captionField = (provider: CaptionProvider) => provider === "qwen" ? "generatedVisualCaptionQwen" : "generatedVisualCaption";
 const captionEmbedder = (provider: CaptionProvider) => provider === "qwen" ? "e5_text_qwen" : "e5_text";
 

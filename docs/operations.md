@@ -113,6 +113,20 @@ Admin sliders store relative reciprocal-rank weights. Defaults are:
 
 At least one weight in each group must be positive. Auto mode resolves exact values from the live facet vocabulary, supplements them with curated synonyms, and supports OR families across material/effect fields. Preferred matches occupy roughly six of every seven result positions; the remaining lane is an unfiltered fallback. Explicit request filters always win over a conflicting derived field.
 
+## Managed Meilisearch settings
+
+Use the full-width panel at the bottom of `/admin` to inspect and edit the application's global Meilisearch profile. It manages displayed, searchable, filterable, and sortable attributes, `pagination.maxTotalHits`, and faceting limits/order. Required fields are locked. Embedder definitions are shown read-only because their names and dimensions must stay compatible with the vectors produced by inference.
+
+Saving submits asynchronous settings tasks for every available managed index and persists the desired profile in `data/search-state.sqlite`. Stable, legacy preview, and current preview therefore use the same profile; an unavailable preview receives it when next built. The UI reports per-index task and drift status. Retry an out-of-sync index after correcting the reported Meilisearch error. Do not start a build/backfill while settings are applying; the API enforces this in both directions.
+
+Editable index settings need no service restart. Searchable, filterable, or sortable changes can trigger internal Meilisearch re-indexing, during which the existing index remains available. They do not require caption or visual embeddings to be regenerated. Connection/server options remain outside the panel:
+
+The active search-document contract omits `category`, `categoryZh`, `detail`, `price`, `availability`, and the nested `Lead time` attribute. Restart the API and indexer after deploying that contract, then run a **Full rebuild** to remove those values from documents created by an older version. Applying the managed settings profile removes their search/facet/display configuration, but settings updates do not rewrite document payloads.
+
+- `MEILI_URL` or `MEILI_INDEX_UID`: restart API and indexer.
+- `MEILI_MASTER_KEY` or Docker-level Meilisearch options: restart/recreate Meilisearch and restart API/indexer.
+- Model IDs, dimensions, preprocessing, or embedder names: restart affected inference/indexer services and run the appropriate rebuild or backfill.
+
 ## Backups and reset
 
 Back up `data/search-state.sqlite` plus its WAL files while services are stopped, and `data/evaluation`. SQLite now contains the reusable caption cache as well as control state and judgments. Losing it does not affect SampleHub, but forces captions to be regenerated.

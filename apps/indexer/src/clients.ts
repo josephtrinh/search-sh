@@ -1,5 +1,5 @@
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import type { CaptionProvider, ProductDocument, VisualGeneration, VisualModel } from "@samplehub/contracts";
+import { defaultManagedMeilisearchSettings, type CaptionProvider, type ManagedMeilisearchSettings, type ProductDocument, type VisualGeneration, type VisualModel } from "@samplehub/contracts";
 import { config } from "./config";
 import { CatalogImageError } from "./image-normalizer";
 import { generationFromEmbedders, visualEmbedder } from "./visual-generation";
@@ -75,12 +75,9 @@ export class MeiliClient {
     return (response.results ?? []).flatMap((entry) => entry.uid ? [entry.uid] : []);
   }
   async create(uid: string) { await this.wait((await this.request("POST", "/indexes", { uid, primaryKey: "id" })).taskUid); }
-  async configure(uid: string, generation: VisualGeneration = "current") {
+  async configure(uid: string, generation: VisualGeneration = "current", profile: ManagedMeilisearchSettings = defaultManagedMeilisearchSettings) {
     const settings = {
-      displayedAttributes: ["id","groupId","brand","normalizedBrand","series","normalizedSeries","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","description","detail","remarks","price","availability","width","height","length","depth","area","updatedAt","thumbnailId","images","attributes","_visualEmbeddingState"],
-      searchableAttributes: ["brand","series","name","sku","model","item","category","categoryZh","material","color","origin","effect","surface","edge","sizeGroup","waterAbsorption","fireResistance","generatedVisualCaption","generatedVisualCaptionQwen","description","detail","remarks","attributes"],
-      filterableAttributes: ["groupId","category","material","color","origin","effect","brand","series","model","surface","edge","sizeGroup","waterAbsorption","fireResistance","price","availability"],
-      sortableAttributes: ["price"], pagination: { maxTotalHits: 10000 }, faceting: { maxValuesPerFacet: 100, sortFacetValuesBy: { "*": "count" } },
+      ...profile,
       embedders: {
         e5_text: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS },
         ...(config.CAPTION_INDEX_PROVIDER === "qwen" ? { e5_text_qwen: { source: "userProvided", dimensions: config.TEXT_EMBEDDING_DIMENSIONS } } : {}),

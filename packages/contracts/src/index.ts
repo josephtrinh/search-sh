@@ -1,4 +1,5 @@
 import { z } from "zod";
+export * from "./meilisearch-settings";
 
 export const rankingModes = [
   "auto",
@@ -46,7 +47,6 @@ export interface VisualModelStatus {
 }
 
 export const facetKeys = [
-  "category",
   "material",
   "color",
   "origin",
@@ -59,8 +59,6 @@ export const facetKeys = [
   "sizeGroup",
   "waterAbsorption",
   "fireResistance",
-  "price",
-  "availability",
 ] as const;
 
 export type FacetKey = (typeof facetKeys)[number];
@@ -111,8 +109,6 @@ export interface ProductDocument {
   sku: string | null;
   model: string | null;
   item: string | null;
-  category: string | null;
-  categoryZh: string | null;
   material: string | null;
   color: string | null;
   origin: string | null;
@@ -123,10 +119,7 @@ export interface ProductDocument {
   waterAbsorption: string | null;
   fireResistance: string | null;
   description: string | null;
-  detail: string | null;
   remarks: string | null;
-  price: number | null;
-  availability: string | null;
   width: number | null;
   height: number | null;
   length: number | null;

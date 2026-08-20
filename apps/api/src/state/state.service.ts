@@ -187,6 +187,9 @@ export class StateService implements OnModuleInit, OnModuleDestroy {
   listIndexRuns(): IndexRunSummary[] {
     return (this.db.prepare("SELECT * FROM index_runs ORDER BY created_at DESC LIMIT 100").all() as Record<string, unknown>[]).map((row) => this.mapRun(row));
   }
+  hasActiveIndexRuns(): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM index_runs WHERE status IN ('queued','running','cancelling') LIMIT 1").get());
+  }
   requestCancellation(id: string): IndexRunSummary | null {
     this.db.prepare("UPDATE index_runs SET status='cancelling' WHERE id=? AND status IN ('queued','running')").run(id);
     return this.getIndexRun(id);

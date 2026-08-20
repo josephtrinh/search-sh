@@ -13,10 +13,10 @@ async function main() {
     await meili.configure(uid);
     const product: ProductDocument = {
       id: "smoke-product", groupId: createGroupId("Calacatta", "Stone Lab"), brand: "Stone Lab", normalizedBrand: normalizeGroupPart("Stone Lab"),
-      series: "Calacatta", normalizedSeries: normalizeGroupPart("Calacatta"), name: "Cloud tile", sku: "SMOKE-1", model: "Cloud", item: null, category: null, categoryZh: null,
+      series: "Calacatta", normalizedSeries: normalizeGroupPart("Calacatta"), name: "Cloud tile", sku: "SMOKE-1", model: "Cloud", item: null,
       material: "Marble", color: "Grey", origin: "Italy", effect: "Stone", surface: "Honed", edge: "Rectified", sizeGroup: "600x600",
-      waterAbsorption: null, fireResistance: null, description: "Quiet grey marble tile", detail: null, remarks: null, price: null,
-      availability: null, width: 600, height: 10, length: 600, depth: null, area: null, updatedAt: new Date().toISOString(), thumbnailId: null, images: [], attributes: {},
+      waterAbsorption: null, fireResistance: null, description: "Quiet grey marble tile", remarks: null,
+      width: 600, height: 10, length: 600, depth: null, area: null, updatedAt: new Date().toISOString(), thumbnailId: null, images: [], attributes: {},
     };
     const inference = new InferenceClient();
     const textEmbedder = captionEmbedder(config.CAPTION_INDEX_PROVIDER);

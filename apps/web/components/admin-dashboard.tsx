@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useTransition } from "react";
 import type { CaptionProvider, CaptionProviderStatus, IndexRunMode, IndexRunSummary, IndexScope, IndexScopeStatus, RankingConfig, VisualGeneration, VisualModel, VisualModelStatus } from "@samplehub/contracts";
+import { MeilisearchSettingsPanel } from "./meilisearch-settings-panel";
 
 const API = "/api";
 
@@ -91,5 +92,6 @@ export function AdminDashboard() {
     <section className="panel ranking-panel"><div className="panel-heading"><div><p className="kicker">RANKING</p><h2>Balanced preset</h2></div><button disabled={!ranking || pending} onClick={() => perform(saveRanking)}>Save weights</button></div>
       {ranking ? <div className="sliders">{Object.entries(ranking).filter(([key]) => key !== "version").map(([key, value]) => <label key={key}><span>{key.replace(/([A-Z])/g, " $1")}</span><input type="range" min="0" max="1" step="0.05" value={value} onChange={(event) => setRanking({ ...ranking, [key]: Number(event.target.value) } as RankingConfig)} /><output>{value.toFixed(2)}</output></label>)}</div> : <p>Loading ranking configuration…</p>}</section>
     <section className="panel eval-panel"><div className="panel-heading"><div><p className="kicker">RELEVANCE</p><h2>Judgment workspace</h2></div><span className="status-dot muted">nDCG@10</span></div><p>Create evaluation queries through the API, attach deliberate local image fixtures, and grade Brand+Series groups from 0–2. Reports use the globally selected visual model.</p><a href="/api-docs" target="_blank" rel="noreferrer">Open evaluator API →</a></section>
+    <MeilisearchSettingsPanel />
   </div>;
 }

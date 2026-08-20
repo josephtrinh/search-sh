@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ProductDocument } from "@samplehub/contracts";
+import { productDocumentFields, type ProductDocument } from "@samplehub/contracts";
 
 export const normalizeGroupPart = (value: string): string => value.trim().toLocaleLowerCase("en-US");
 
@@ -16,8 +16,6 @@ export function buildEmbeddingText(product: ProductDocument, visualCaption?: str
     ["SKU", product.sku],
     ["Model", product.model],
     ["Item", product.item],
-    ["Category", product.category],
-    ["Category (Chinese)", product.categoryZh],
     ["Material", product.material],
     ["Color", product.color],
     ["Origin", product.origin],
@@ -29,9 +27,8 @@ export function buildEmbeddingText(product: ProductDocument, visualCaption?: str
     ["Fire resistance", product.fireResistance],
     ["Visual description", visualCaption],
     ["Description", product.description],
-    ["Detail", product.detail],
     ["Remarks", product.remarks],
-    ...Object.entries(product.attributes).map(([key, value]) => [key, Array.isArray(value) ? value.join(", ") : value] as [string, unknown]),
+    ...Object.entries(product.attributes).filter(([key]) => key !== "Lead time").map(([key, value]) => [key, Array.isArray(value) ? value.join(", ") : value] as [string, unknown]),
   ];
   return fields
     .filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== "")
@@ -39,9 +36,4 @@ export function buildEmbeddingText(product: ProductDocument, visualCaption?: str
     .join(". ");
 }
 
-export const PUBLIC_PRODUCT_FIELDS = [
-  "id", "groupId", "brand", "normalizedBrand", "series", "normalizedSeries", "name", "sku", "model", "item",
-  "category", "categoryZh", "material", "color", "origin", "effect", "surface", "edge", "sizeGroup",
-  "waterAbsorption", "fireResistance", "description", "detail", "remarks", "price", "availability",
-  "width", "height", "length", "depth", "area", "updatedAt", "thumbnailId", "images", "attributes",
-] as const;
+export const PUBLIC_PRODUCT_FIELDS = productDocumentFields;

@@ -183,6 +183,16 @@ If Qwen returns `<NO_MATERIAL>`, or a product has no usable representative image
 
 Use **Active caption provider** in `/admin` to switch Florence/Qwen retrieval for the active scope. Keyword queries restrict `attributesToSearchOn` to trusted catalog fields plus only the active caption field, and semantic queries use only the matching E5 vector. Evaluation metadata and pagination cursors record the active caption provider.
 
+## Tune Meilisearch index settings
+
+The bottom of `/admin` contains a **Meilisearch index settings** panel for the six settings groups managed by this application: displayed, searchable, filterable, and sortable attributes plus pagination and faceting. Each control explains its search/performance impact, whether Meilisearch performs internal index work, and its restart requirements. Application-required fields are locked so a tuning experiment cannot break result cards, group lookup, facets, or Florence/Qwen retrieval. Embedder names and dimensions are visible but read-only; use the matching rebuild/backfill workflow for vector changes.
+
+The search document intentionally excludes the unused category/categoryZh, detail, price, availability, and lead-time fields. A rebuild is required to physically remove these values from an index created with the older document contract; applying the managed settings profile alone removes their configured search/facet/display behavior but does not rewrite stored documents.
+
+**Save and apply globally** stores one profile in `data/search-state.sqlite`, applies it asynchronously to every available stable/preview index, and supplies it to future full and preview builds. The panel reports each index as in sync, applying, unavailable, or out of sync and can retry a partial failure. Settings cannot be changed during an index build/backfill, and new index jobs cannot start while a settings task is pending.
+
+Ordinary edits to these six index settings require no service restart. Searchable/filterable/sortable changes may make Meilisearch rebuild internal index structures, but they do not regenerate embeddings or normally require a SampleHub full rebuild. The retired-field cleanup above is different because it changes the indexed document contract. After changing `MEILI_URL` or `MEILI_INDEX_UID` in `.env`, restart API and indexer. Master-key or Docker-level Meilisearch changes require restarting/recreating Meilisearch and restarting API/indexer.
+
 `CAPTION_INDEX_PROVIDER=florence` remains the default for full and incremental indexing. After approving Qwen on a preview and stable backfill, set it to `qwen` and restart the API/indexer for Qwen-only future indexing. A Qwen-only incremental run invalidates Florence readiness when it adds or updates products, preventing an incomplete Florence index from being selected. `llama-server` must be running for Qwen full/incremental generation, but not for normal search.
 
 ## Try DINOv2 or DINOv3 without replacing existing vectors

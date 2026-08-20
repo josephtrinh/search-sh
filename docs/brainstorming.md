@@ -67,9 +67,9 @@ curl -X PATCH 'http://127.0.0.1:7700/indexes/products/settings' \
         "dimensions": 768
       }
     },
-    "searchableAttributes": ["name", "description", "material", "color", "category"],
-    "filterableAttributes": ["category", "material", "color", "price", "brand"],
-    "sortableAttributes": ["price"]
+    "searchableAttributes": ["name", "description", "material", "color", "brand"],
+    "filterableAttributes": ["material", "color", "brand", "surface"],
+    "sortableAttributes": []
   }'
 ```
 
@@ -120,8 +120,8 @@ PRODUCT_API_URL = "https://your-api.com/products"   # should return list of prod
 #   "description": "...",
 #   "material": "marble",
 #   "color": "grey",
-#   "category": "tile",
-#   "price": 45.0,
+#   "surface": "polished",
+#   "effect": "marble",
 #   "images": ["https://....jpg", "https://....jpg"]   # 1–4 images
 # }
 

@@ -4,14 +4,14 @@ import type { ImageAsset, ProductDocument } from "@samplehub/contracts";
 import { config } from "./config";
 
 interface RawProduct extends RowDataPacket {
-  id: string; brand: string; series: string; name: string | null; sku: string | null; model: string | null; item: string | null; category: string | null; categoryZh: string | null;
+  id: string; brand: string; series: string; name: string | null; sku: string | null; model: string | null; item: string | null;
   material: string | null; color: string | null; origin: string | null; effect: string | null; surface: string | null; edge: string | null;
-  sizeGroup: string | null; waterAbsorption: string | null; fireResistance: string | null; description: string | null; detail: string | null;
-  remarks: string | null; price: number | null; width: number | null; height: number | null; length: number | null; depth: number | null;
-  area: string | number | null; updatedAt: Date; thumbnailId: string | null; imageIds: string | null; status: string | null;
+  sizeGroup: string | null; waterAbsorption: string | null; fireResistance: string | null; description: string | null;
+  remarks: string | null; width: number | null; height: number | null; length: number | null; depth: number | null;
+  area: string | number | null; updatedAt: Date; thumbnailId: string | null; imageIds: string | null;
   antiBacterial: string | null; applicationArea1: string | null; applicationArea2: string | null; shadeVariation: string | null;
   evaSuitable: string | null; sri: string | null; slipResistance: string | null; chemicalResistance: string | null; stainResistance: string | null;
-  unit: string | null; leadTime: string | null; pcsBox: string | null; m2Box: string | null; kgBox: string | null; m2Plt: string | null;
+  unit: string | null; pcsBox: string | null; m2Box: string | null; kgBox: string | null; m2Plt: string | null;
   boxPlt: string | null; kgsPlt: string | null; palletWeight: string | null; palletWidth: string | null; palletDepth: string | null;
   palletHeight: string | null; pattern: string | null; surfaceDensity: string | null; environmental: string | null;
   nrc: string[] | string | null; saa: string[] | string | null; alphaWMh: string[] | string | null; soundAbsorptionClass: string[] | string | null;
@@ -20,19 +20,19 @@ interface RawProduct extends RowDataPacket {
 interface RawImage extends RowDataPacket { id: string; path: string; thumbnail: string | null; mime: string | null; productId: string; }
 
 const PRODUCT_SELECT = `SELECT p.id, p.brand_name brand, p.series, p.name, p.sku, p.model, p.item,
-  c.en_name category, c.zho_name categoryZh, p.material, p.color, p.origin, p.effect, p.surface, p.edge,
+  p.material, p.color, p.origin, p.effect, p.surface, p.edge,
   p.size_group sizeGroup, p.water_absorption waterAbsorption, p.fire_resistance fireResistance,
-  p.description, p.detail, p.remarks, p.rrp price, p.status, p.width, p.height, p.length, p.depth, p.area,
+  p.description, p.remarks, p.width, p.height, p.length, p.depth, p.area,
   p.anti_bacterial antiBacterial, p.application_area1 applicationArea1, p.application_area2 applicationArea2,
   p.shade_variation shadeVariation, p.eva_suitable evaSuitable, p.sri, p.slip_resistance slipResistance,
-  p.chemical_resistance chemicalResistance, p.stain_resistance stainResistance, p.unit, p.lead_time leadTime,
+  p.chemical_resistance chemicalResistance, p.stain_resistance stainResistance, p.unit,
   p.pcs_box pcsBox, p.m2_box m2Box, p.kg_box kgBox, p.m2_plt m2Plt, p.box_plt boxPlt, p.kgs_plt kgsPlt,
   p.pallet_weight palletWeight, p.pallet_width palletWidth, p.pallet_depth palletDepth, p.pallet_height palletHeight,
   p.pattern, p.surface_density surfaceDensity, p.environmental, p.nrc, p.saa, p.alpha_w_mh alphaWMh,
   p.sound_absorption_class soundAbsorptionClass, p.core_material coreMaterial, p.ixpe, p.vocs, p.wear_layer wearLayer,
   p.outdoor_indoor outdoorIndoor, p.maintenance,
   p.updated_at updatedAt, p.thumbnail_id thumbnailId, p.image_ids imageIds
-  FROM products p LEFT JOIN const c ON c.id=p.category_id AND c.deleted_at IS NULL`;
+  FROM products p`;
 const ELIGIBLE = `p.deleted_at IS NULL AND COALESCE(p.is_private,0)=0 AND p.type='plan_product'`;
 
 export class CatalogRepository {
@@ -76,16 +76,16 @@ export class CatalogRepository {
       }));
       return {
         id: row.id, groupId: createGroupId(row.series, row.brand), brand: row.brand, normalizedBrand: normalizeGroupPart(row.brand),
-        series: row.series, normalizedSeries: normalizeGroupPart(row.series), name: row.name, sku: row.sku, model: row.model, item: row.item, category: row.category,
-        categoryZh: row.categoryZh, material: row.material, color: row.color, origin: row.origin, effect: row.effect, surface: row.surface,
+        series: row.series, normalizedSeries: normalizeGroupPart(row.series), name: row.name, sku: row.sku, model: row.model, item: row.item,
+        material: row.material, color: row.color, origin: row.origin, effect: row.effect, surface: row.surface,
         edge: row.edge, sizeGroup: row.sizeGroup, waterAbsorption: row.waterAbsorption, fireResistance: row.fireResistance,
-        description: row.description, detail: row.detail, remarks: row.remarks, price: row.price === null ? null : Number(row.price), availability: row.status,
+        description: row.description, remarks: row.remarks,
         width: row.width, height: row.height, length: row.length, depth: row.depth, area: row.area === null ? null : Number(row.area),
         updatedAt: new Date(row.updatedAt).toISOString(), thumbnailId: row.thumbnailId, images,
         attributes: {
           "Anti-bacterial": row.antiBacterial, "Application area 1": row.applicationArea1, "Application area 2": row.applicationArea2,
           "Shade variation": row.shadeVariation, "EVA suitable": row.evaSuitable, SRI: row.sri, "Slip resistance": row.slipResistance,
-          "Chemical resistance": row.chemicalResistance, "Stain resistance": row.stainResistance, Unit: row.unit, "Lead time": row.leadTime,
+          "Chemical resistance": row.chemicalResistance, "Stain resistance": row.stainResistance, Unit: row.unit,
           "Pieces per box": row.pcsBox, "m² per box": row.m2Box, "kg per box": row.kgBox, "m² per pallet": row.m2Plt,
           "Boxes per pallet": row.boxPlt, "kg per pallet": row.kgsPlt, "Pallet weight": row.palletWeight,
           "Pallet width": row.palletWidth, "Pallet depth": row.palletDepth, "Pallet height": row.palletHeight,

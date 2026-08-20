@@ -44,8 +44,6 @@ async function documents(): Promise<SampleDocument[]> {
           "series",
           "normalizedSeries",
           "name",
-          "category",
-          "categoryZh",
           "material",
           "color",
           "thumbnailId",

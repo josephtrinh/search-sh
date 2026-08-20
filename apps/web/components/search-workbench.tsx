@@ -20,7 +20,6 @@ import {
 const API = "/api";
 const AUTO_SEARCH_DELAY_MS = 1100;
 const LABELS: Record<FacetKey, string> = {
-  category: "Category",
   material: "Material",
   color: "Colour",
   origin: "Origin",
@@ -33,8 +32,6 @@ const LABELS: Record<FacetKey, string> = {
   sizeGroup: "Size group",
   waterAbsorption: "Water absorption",
   fireResistance: "Fire resistance",
-  price: "Price",
-  availability: "Availability",
 };
 const MATCH_LABEL = {
   keyword: "Keyword match",

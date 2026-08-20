@@ -11,13 +11,15 @@ test("normalizes grouping like SampleHub", () => {
 test("places the generated visual caption in the E5 passage without changing source copy", () => {
   const product = {
     id: "1", groupId: "group", brand: "Brand", normalizedBrand: "brand", series: "Series", normalizedSeries: "series",
-    name: null, sku: null, model: "M1", item: null, category: null, categoryZh: null, material: "Porcelain Tile", color: "Grey",
+    name: null, sku: null, model: "M1", item: null, material: "Porcelain Tile", color: "Grey",
     origin: "Italy", effect: "Marble", surface: "Honed", edge: null, sizeGroup: null, waterAbsorption: null, fireResistance: null,
-    description: "Source description", detail: null, remarks: null, price: null, availability: null, width: null, height: null,
-    length: null, depth: null, area: null, updatedAt: new Date(0).toISOString(), thumbnailId: null, images: [], attributes: {},
+    description: "Source description", remarks: null, width: null, height: null,
+    length: null, depth: null, area: null, updatedAt: new Date(0).toISOString(), thumbnailId: null, images: [], attributes: { "Lead time": "14 days", "Slip resistance": "R10" },
   } satisfies ProductDocument;
   const passage = buildEmbeddingText(product, "Soft grey veining on a pale surface.");
   assert.match(passage, /Visual description: Soft grey veining/);
   assert.match(passage, /Description: Source description/);
+  assert.doesNotMatch(passage, /Lead time|14 days/);
+  assert.match(passage, /Slip resistance: R10/);
   assert.ok(passage.indexOf("Visual description") < passage.indexOf("Description: Source"));
 });

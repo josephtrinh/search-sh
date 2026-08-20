@@ -29,3 +29,29 @@ test("documentPage omits fields so Meilisearch returns complete documents", asyn
     globalThis.fetch = originalFetch;
   }
 });
+
+test("configure applies a supplied managed profile without replacing generated embedders", async () => {
+  const { MeiliClient } = await import("./clients");
+  const { defaultManagedMeilisearchSettings } = await import("@samplehub/contracts");
+  const originalFetch = globalThis.fetch;
+  const profile = structuredClone(defaultManagedMeilisearchSettings);
+  profile.pagination.maxTotalHits = 321;
+  let settingsBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path.endsWith("/settings")) {
+      settingsBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ taskUid: 11 }, { status: 202 });
+    }
+    if (path === "/tasks/11") return Response.json({ status: "succeeded" });
+    throw new Error(`Unexpected request: ${path}`);
+  };
+  try {
+    await new MeiliClient().configure("products", "current", profile);
+    assert.deepEqual(settingsBody?.pagination, { maxTotalHits: 321 });
+    assert.equal((settingsBody?.embedders as Record<string, unknown>).siglip_image_v2 !== undefined, true);
+    assert.equal((settingsBody?.embedders as Record<string, unknown>).dinov3_image_v2 !== undefined, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -21,11 +21,13 @@ describe("StateService", () => {
   it("initializes balanced ranking defaults", () => { expect(service.getRanking()).toEqual(defaultRankingConfig); });
   it("persists index runs and cancellation", () => {
     const run = service.createIndexRun("full"); expect(run.status).toBe("queued");
+    expect(service.hasActiveIndexRuns()).toBe(true);
     expect(run.captionedImages).toBe(0); expect(run.cachedCaptions).toBe(0); expect(run.failedCaptions).toBe(0);
     expect(run.siglipEmbeddedImages).toBe(0); expect(run.dinov2EmbeddedImages).toBe(0); expect(run.dinov3EmbeddedImages).toBe(0);
     expect(run.normalizedImages).toBe(0); expect(run.visualEligibleProducts).toBe(0); expect(run.qualityWarning).toBeNull();
     expect(service.requestCancellation(run.id)?.status).toBe("cancelling");
     expect(service.markCancelled(run.id)?.status).toBe("cancelled");
+    expect(service.hasActiveIndexRuns()).toBe(false);
   });
   it("migrates legacy runs and accepts specialized backfills", () => {
     expect(service.getIndexRun("legacy-run")?.status).toBe("completed");

@@ -1,4 +1,4 @@
-import { BadRequestException, Body, ConflictException, Controller, Delete, Get, NotFoundException, Param, Patch, Post, UploadedFile, UseInterceptors } from "@nestjs/common";
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, HttpCode, HttpStatus, NotFoundException, Param, Patch, Post, UploadedFile, UseInterceptors } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { Queue } from "bullmq";
@@ -14,6 +14,8 @@ import { SetVisualModelDto } from "./dto/set-visual-model.dto";
 import { StartIndexRunDto } from "./dto/start-index-run.dto";
 import { SetIndexScopeDto } from "./dto/set-index-scope.dto";
 import { SetCaptionProviderDto } from "./dto/set-caption-provider.dto";
+import { UpdateMeilisearchSettingsDto } from "./dto/update-meilisearch-settings.dto";
+import { MeilisearchSettingsService } from "./meilisearch-settings.service";
 
 const RankingSchema = z.object({ version: z.literal(2), textKeywordWeight: z.number().min(0), textSemanticWeight: z.number().min(0), textVisualWeight: z.number().min(0), combinedKeywordWeight: z.number().min(0), combinedSemanticWeight: z.number().min(0), combinedVisualTextWeight: z.number().min(0), combinedImageWeight: z.number().min(0) })
   .refine((value) => value.textKeywordWeight + value.textSemanticWeight + value.textVisualWeight > 0, "At least one text-only weight must be positive")
@@ -24,7 +26,7 @@ const EvalQuerySchema = z.object({ label: z.string().min(1).max(200), queryText:
 @Controller("admin")
 export class AdminController {
   private readonly queue = new Queue("catalog-indexing", { connection: redisConnection() });
-  constructor(private readonly state: StateService, private readonly search: SearchService) {}
+  constructor(private readonly state: StateService, private readonly search: SearchService, private readonly meilisearchSettings: MeilisearchSettingsService) {}
   @Get("ranking") ranking() { return this.state.getRanking(); }
   @Patch("ranking") setRanking(@Body() body: unknown) { return this.state.setRanking(RankingSchema.parse(body)); }
   @Get("visual-model")
@@ -53,6 +55,7 @@ export class AdminController {
   @ApiOperation({ summary: "Start a catalog index or specialized backfill run" })
   @ApiCreatedResponse({ description: "Queued index run" })
   async start(@Body() body: StartIndexRunDto) {
+    await this.meilisearchSettings.assertIndexOperationsAllowed();
     const mode = body.mode;
     const captionProvider = mode === "caption_backfill" ? body.captionProvider ?? "florence" : undefined;
     const targetScope = mode === "caption_backfill" ? body.targetScope ?? this.state.getIndexScope() : undefined;
@@ -65,6 +68,22 @@ export class AdminController {
     await this.queue.add(mode, { runId: run.id, mode, generation, productLimit, captionProvider, targetScope }, { jobId: run.id, attempts: 1, removeOnComplete: 100, removeOnFail: 100 });
     return run;
   }
+  @Get("meilisearch-settings")
+  @ApiOperation({ summary: "Get the global managed Meilisearch profile and live index status" })
+  @ApiOkResponse({ description: "Managed Meilisearch settings status" })
+  meilisearchSettingsStatus() { return this.meilisearchSettings.status(); }
+  @Patch("meilisearch-settings")
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: "Save and apply the managed Meilisearch profile to every available index" })
+  updateMeilisearchSettings(@Body() body: UpdateMeilisearchSettingsDto) { return this.meilisearchSettings.apply(body); }
+  @Delete("meilisearch-settings")
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: "Restore and apply the application default Meilisearch profile" })
+  resetMeilisearchSettings() { return this.meilisearchSettings.reset(); }
+  @Post("meilisearch-settings/retry")
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: "Retry the saved Meilisearch profile for out-of-sync indexes" })
+  retryMeilisearchSettings() { return this.meilisearchSettings.retry(); }
   @Delete("index-runs/:id")
   @ApiOperation({ summary: "Cancel a queued or active index run" })
   @ApiOkResponse({ description: "Cancellation requested or queued run cancelled" })

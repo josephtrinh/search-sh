@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { Job } from "bullmq";
-import type { CaptionProvider, ImageAsset, IndexRunMode, IndexScope, ProductDocument, VisualGeneration, VisualModel } from "@samplehub/contracts";
+import { ManagedMeilisearchSettingsSchema, defaultManagedMeilisearchSettings, type CaptionProvider, type ImageAsset, type IndexRunMode, type IndexScope, type ManagedMeilisearchSettings, type ProductDocument, type VisualGeneration, type VisualModel } from "@samplehub/contracts";
 import { buildEmbeddingText } from "@samplehub/catalog";
 import { runBatchWithIsolation } from "./batch-isolation";
 import { CatalogRepository } from "./catalog";
@@ -161,7 +161,7 @@ export class IndexRunner {
     if (preview) await this.cleanupStalePreviewShadows(previewTarget!, shadow);
     await this.meili.deleteIndex(shadow);
     await this.meili.create(shadow);
-    await this.meili.configure(shadow, generation);
+    await this.meili.configure(shadow, generation, this.meilisearchSettingsProfile());
     let after: string | null = null;
     let processed = 0;
     let embedded = 0;
@@ -966,6 +966,16 @@ export class IndexRunner {
     const row = this.db.prepare("SELECT value_json FROM settings WHERE key=?").get(key) as { value_json?: string } | undefined;
     if (!row?.value_json) return null;
     try { return String(JSON.parse(row.value_json)); } catch { return null; }
+  }
+  private meilisearchSettingsProfile(): ManagedMeilisearchSettings {
+    const row = this.db.prepare("SELECT value_json FROM settings WHERE key='meilisearch_settings_profile_v2'").get() as { value_json?: string } | undefined;
+    if (!row?.value_json) return structuredClone(defaultManagedMeilisearchSettings);
+    try {
+      const parsed = ManagedMeilisearchSettingsSchema.safeParse(JSON.parse(row.value_json));
+      return parsed.success ? parsed.data : structuredClone(defaultManagedMeilisearchSettings);
+    } catch {
+      return structuredClone(defaultManagedMeilisearchSettings);
+    }
   }
   private setSetting(key: string, value: unknown) {
     this.db.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)
