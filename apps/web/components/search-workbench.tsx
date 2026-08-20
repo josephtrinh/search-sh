@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   facetKeys,
+  type CaptionProvider,
+  type CaptionProviderStatus,
   type FacetKey,
   type SearchResponse,
   type VisualModel,
@@ -63,7 +65,12 @@ export function SearchWorkbench() {
   const [visualStatus, setVisualStatus] = useState<VisualModelStatus | null>(
     null,
   );
+  const [captionProvider, setCaptionProvider] =
+    useState<CaptionProvider>("florence");
+  const [captionStatus, setCaptionStatus] =
+    useState<CaptionProviderStatus | null>(null);
   const [switchingModel, setSwitchingModel] = useState(false);
+  const [switchingCaption, setSwitchingCaption] = useState(false);
   const [searchPanelStuck, setSearchPanelStuck] = useState(false);
   const [searching, setSearching] = useState(false);
   const requestRef = useRef(0);
@@ -79,18 +86,31 @@ export function SearchWorkbench() {
   latestStateRef.current = { query, filters: selected, mode, image, crop };
 
   useEffect(() => {
-    void fetch(`${API}/admin/visual-model`)
-      .then((response) =>
-        response.ok ? (response.json() as Promise<VisualModelStatus>) : null,
-      )
-      .then((status) => {
-        if (!status) return;
-        setVisualStatus(status);
-        setVisualModel(status.active);
-        if (status.active !== "siglip2")
+    void Promise.all([
+      fetch(`${API}/admin/visual-model`)
+        .then((response) =>
+          response.ok ? (response.json() as Promise<VisualModelStatus>) : null,
+        )
+        .catch(() => null),
+      fetch(`${API}/admin/caption-provider`)
+        .then((response) =>
+          response.ok
+            ? (response.json() as Promise<CaptionProviderStatus>)
+            : null,
+        )
+        .catch(() => null),
+    ]).then(([visual, captions]) => {
+      if (visual) {
+        setVisualStatus(visual);
+        setVisualModel(visual.active);
+        if (visual.active !== "siglip2")
           setMode((current) => (current === "text_visual" ? "auto" : current));
-      })
-      .catch(() => undefined);
+      }
+      if (captions) {
+        setCaptionStatus(captions);
+        setCaptionProvider(captions.active);
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -185,6 +205,10 @@ export function SearchWorkbench() {
       setVisualModel(next.visualModel);
       setVisualStatus((current) =>
         current ? { ...current, active: next.visualModel } : current,
+      );
+      setCaptionProvider(next.captionProvider);
+      setCaptionStatus((current) =>
+        current ? { ...current, active: next.captionProvider } : current,
       );
       setResult((previous) => {
         if (!cursor || !previous) return next;
@@ -285,6 +309,43 @@ export function SearchWorkbench() {
     }
   }
 
+  async function selectCaptionProvider(provider: CaptionProvider) {
+    if (provider === captionProvider || switchingCaption) return;
+    cancelAutoSearch();
+    requestRef.current += 1;
+    setSearching(false);
+    setSwitchingCaption(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API}/admin/caption-provider`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider }),
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          message?: string | string[];
+        } | null;
+        const message = Array.isArray(body?.message)
+          ? body.message.join(", ")
+          : body?.message;
+        throw new Error(message ?? "Unable to switch caption provider");
+      }
+      const status = (await response.json()) as CaptionProviderStatus;
+      setCaptionStatus(status);
+      setCaptionProvider(status.active);
+      if (result) await run();
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to switch caption provider",
+      );
+    } finally {
+      setSwitchingCaption(false);
+    }
+  }
+
   function toggle(key: string, value: string) {
     const values = selected[key] ?? [];
     const nextValues = values.includes(value)
@@ -365,46 +426,83 @@ export function SearchWorkbench() {
                 </button>
               );
             })}
-            <div
-              className="model-switch"
-              role="group"
-              aria-label="Active visual model"
-            >
-              <span>Visual</span>
-              {(["siglip2", "dinov2", "dinov3"] as const).map((model) => {
-                const ready =
-                  model === "siglip2" ||
-                  (model === "dinov2"
-                    ? visualStatus?.dinov2Ready
-                    : visualStatus?.dinov3Ready);
-                const label =
-                  model === "siglip2"
-                    ? "SigLIP 2"
-                    : model === "dinov2"
-                      ? "DINOv2"
-                      : "DINOv3";
-                return (
-                  <button
-                    type="button"
-                    className={
-                      visualModel === model
-                        ? "model-option active"
-                        : "model-option"
-                    }
-                    aria-pressed={visualModel === model}
-                    disabled={switchingModel || !ready}
-                    title={
-                      ready
-                        ? `Use ${label}`
-                        : `${label} is not ready for this index`
-                    }
-                    onClick={() => void selectVisualModel(model)}
-                    key={model}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
+            <div className="provider-switches">
+              <div
+                className="model-switch"
+                role="group"
+                aria-label="Active visual model"
+              >
+                <span>Visual</span>
+                {(["siglip2", "dinov2", "dinov3"] as const).map((model) => {
+                  const ready =
+                    model === "siglip2" ||
+                    (model === "dinov2"
+                      ? visualStatus?.dinov2Ready
+                      : visualStatus?.dinov3Ready);
+                  const label =
+                    model === "siglip2"
+                      ? "SigLIP 2"
+                      : model === "dinov2"
+                        ? "DINOv2"
+                        : "DINOv3";
+                  return (
+                    <button
+                      type="button"
+                      className={
+                        visualModel === model
+                          ? "model-option active"
+                          : "model-option"
+                      }
+                      aria-pressed={visualModel === model}
+                      disabled={switchingModel || !ready}
+                      title={
+                        ready
+                          ? `Use ${label}`
+                          : `${label} is not ready for this index`
+                      }
+                      onClick={() => void selectVisualModel(model)}
+                      key={model}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div
+                className="model-switch caption-switch"
+                role="group"
+                aria-label="Active caption provider"
+              >
+                <span>Caption</span>
+                {(["florence", "qwen"] as const).map((provider) => {
+                  const ready =
+                    provider === "florence"
+                      ? captionStatus?.florenceReady
+                      : captionStatus?.qwenReady;
+                  const label = provider === "florence" ? "Florence" : "Qwen";
+                  return (
+                    <button
+                      type="button"
+                      className={
+                        captionProvider === provider
+                          ? "model-option active"
+                          : "model-option"
+                      }
+                      aria-pressed={captionProvider === provider}
+                      disabled={switchingCaption || !ready}
+                      title={
+                        ready
+                          ? `Use ${label} captions`
+                          : `${label} captions are not ready for this index`
+                      }
+                      onClick={() => void selectCaptionProvider(provider)}
+                      key={provider}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>

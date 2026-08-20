@@ -4,22 +4,138 @@
 
 The system reads SampleHub MySQL and S3 with read-only credentials. It owns only Meilisearch documents, Redis jobs, a local SQLite control/caption database, and evaluation fixtures. It never updates SampleHub rows, descriptions, or objects.
 
-```text
-SampleHub MySQL ─┐
-                 ├─> BullMQ indexer ─┬─> multilingual E5 passages ─┐
-SampleHub S3 ────┘                   ├─> SigLIP 2 images ──────────┤
-                                    ├─> DINOv2 images ────────────┼─> Meilisearch
-                                    ├─> DINOv3 images ────────────┤
-                                    └─> Florence/Qwen captions ──┘
-                                               │                         ↑
-                                               └─> SQLite cache          │
-                                                                          │
-Next.js web/admin ─> NestJS API ─> E5 + active visual provider ───────────┘
-                         │
-                         └─> SQLite run state, ranking, evaluation
+### Catalog indexing and embedding generation
+
+```mermaid
+flowchart LR
+  subgraph source[Read-only SampleHub sources]
+    mysql[(MySQL product metadata)]
+    s3[(S3 product images)]
+  end
+
+  subgraph worker[BullMQ indexer]
+    job["Index job<br/>full · incremental · preview · backfill"]
+    eligible["Eligibility filter<br/>and document mapping"]
+    select["Image selection<br/>thumbnail or all images"]
+    normalize["Safety checks and normalization<br/>EXIF · aspect-preserving resize · JPEG"]
+    views["Current catalog views<br/>whole image + adaptive long-axis crops"]
+    representative["Representative image<br/>thumbnail or first-image fallback"]
+  end
+
+  mysql --> job --> eligible --> select
+  s3 --> select
+  select --> normalize
+  normalize --> views
+  normalize --> representative
+
+  subgraph visual[Parallel visual embeddings]
+    siglip["SigLIP 2 NaFlex<br/>native aspect · up to 576 patches"] --> sigvec["siglip_image_v2<br/>768 dimensions"]
+    dino2["DINOv2 Base<br/>392 letterbox · CLS + patch mean"] --> dino2vec["dinov2_image_v2<br/>768 dimensions"]
+    dino3["DINOv3 ViT-B/16<br/>384 letterbox · CLS + patch mean"] --> dino3vec["dinov3_image_v2<br/>768 dimensions"]
+  end
+
+  views --> siglip
+  views --> dino2
+  views --> dino3
+
+  subgraph captions[Provider-specific caption and E5 branches]
+    identity["Image hash + provider/model/prompt fingerprint"]
+    cache[(SQLite caption cache)]
+    cached{"Caption cache hit?"}
+    provider{"Configured caption provider"}
+    florence["Florence 2<br/>MORE_DETAILED_CAPTION"]
+    qwen["Qwen 3.5 0.8B<br/>material prompt v2"]
+    captionResult["Provider-specific caption"]
+    captionOutput{"Caption provider"}
+    florenceField[generatedVisualCaption]
+    qwenField[generatedVisualCaptionQwen]
+    florencePassage["Structured fields + Florence caption"] --> e5Florence["Multilingual E5 passage"] --> e5vec["e5_text<br/>768 dimensions"]
+    qwenPassage["Structured fields + Qwen caption"] --> e5Qwen["Multilingual E5 passage"] --> e5qvec["e5_text_qwen<br/>768 dimensions"]
+  end
+
+  representative --> identity --> cached
+  cache <--> cached
+  cached -->|hit| captionResult
+  cached -->|miss| provider
+  provider -->|Florence| florence --> captionResult
+  provider -->|Qwen| qwen --> captionResult
+  florence --> cache
+  qwen --> cache
+  captionResult --> captionOutput
+  captionOutput -->|Florence| florenceField
+  captionOutput -->|Qwen| qwenField
+  florenceField --> florencePassage
+  qwenField --> qwenPassage
+  eligible --> florencePassage
+  eligible --> qwenPassage
+
+  merge["Merge product fields, captions,<br/>vectors, and embedding state"]
+  fallback["Per-product failure fallback<br/>missing visual vector or structured-only E5"]
+  target["Meilisearch target<br/>run shadow · preview · stable"]
+  control[("SQLite control data<br/>runs · failures · fingerprints<br/>readiness · watermarks")]
+
+  sigvec --> merge
+  dino2vec --> merge
+  dino3vec --> merge
+  e5vec --> merge
+  e5qvec --> merge
+  eligible --> merge
+  normalize -. invalid image or visual inference failure .-> fallback
+  provider -. caption failure .-> fallback
+  fallback -. preserve searchable document .-> merge
+  merge --> target
+  job <--> control
+  merge --> control
 ```
 
-All five providers are lazy-loaded behind one priority scheduler. Interactive query work has priority over indexing work at task boundaries. Model-specific device settings may select MPS or CPU. DINOv3 verifies and extracts its local gated archive only on first use.
+Legacy indexes use the unsuffixed visual-vector names. Full current-generation builds produce all three visual providers, while caption backfills update only the selected caption field and its matching E5 vector.
+
+### Query-time embedding and retrieval
+
+```mermaid
+flowchart TD
+  web["Next.js search UI<br/>text · cropped image · filters · ranking mode"] --> api[NestJS Search API]
+  admin["Selected test configuration<br/>index scope · visual model · caption provider"] --> api
+  api --> resolve["Resolve index UID, visual generation,<br/>ready embedders, and provider-specific fields"]
+  resolve --> interpret["Interpret catalog vocabulary<br/>and combine explicit + derived filters"]
+  interpret --> plan{"Requested ranking mode<br/>and available inputs"}
+
+  subgraph branches[Independent retrieval branches]
+    keyword["Keyword branch<br/>catalog fields + active caption field"]
+    e5query["E5 query embedding<br/>query prefix · 768 dimensions"] --> semantic["Semantic branch<br/>e5_text or e5_text_qwen"]
+    sigtext["SigLIP text embedding"] --> textvisual["Text-to-image branch<br/>siglip_image or siglip_image_v2"]
+    queryimage["Single whole query image"] --> visualchoice{"Active visual model"}
+    visualchoice -->|SigLIP 2| sigquery["SigLIP image embedding"]
+    visualchoice -->|DINOv2| dino2query["DINOv2 image embedding"]
+    visualchoice -->|DINOv3| dino3query["DINOv3 image embedding"]
+    sigquery --> imagevisual["Image-similarity branch<br/>generation-specific visual embedder"]
+    dino2query --> imagevisual
+    dino3query --> imagevisual
+  end
+
+  plan --> keyword
+  plan --> e5query
+  plan -->|SigLIP-compatible text mode| sigtext
+  web -->|optional cropped image| queryimage
+  resolve --> visualchoice
+  resolve -->|active caption provider| semantic
+  visualchoice -. DINO models have no text encoder .-> imageOnly[No text-to-image branch]
+
+  filters["Mandatory explicit filters<br/>preferred interpreted filters<br/>unfiltered fallback tier"]
+  plan --> filters
+  keyword --> meili[(Selected Meilisearch index)]
+  semantic --> meili
+  textvisual --> meili
+  imagevisual --> meili
+  filters --> meili
+
+  meili --> fusion["Weighted reciprocal-rank fusion<br/>scores remain provider-local"]
+  fusion --> interleave["Preferred/fallback interleaving"]
+  interleave --> grouped["Distinct by groupId<br/>match sources + facets + cursor"]
+  grouped --> web
+```
+
+Inference providers are lazy-loaded behind one priority scheduler. Interactive query work has priority over indexing work at task boundaries. Model-specific device settings may select MPS or CPU. DINOv3 verifies and extracts its local gated archive only on first use.
 
 ## Catalog and generated data
 
@@ -50,14 +166,14 @@ For current catalog embeddings, every selected source image contributes its whol
 
 No new `siglip_text` product vector is generated. SigLIP text encoding remains useful for searching the SigLIP visual vector space. Both DINO providers are image-only and cannot embed a text query into their vector spaces.
 
-| Mode            | SigLIP active                                      | DINOv2 active                               | DINOv3 active                               |
-| --------------- | -------------------------------------------------- | ------------------------------------------- | ------------------------------------------- |
-| `keyword`       | raw lexical baseline                               | raw lexical baseline                        | raw lexical baseline                        |
-| `text_semantic` | E5 query against `e5_text`                         | E5 query against `e5_text`                  | E5 query against `e5_text`                  |
-| `text_hybrid`   | separate keyword and E5 branches                   | separate keyword and E5 branches            | separate keyword and E5 branches            |
-| `text_visual`   | SigLIP text against its generation-specific image embedder | unavailable                        | unavailable                                 |
-| `image_visual`  | SigLIP image against its generation-specific embedder | DINOv2 image against its generation-specific embedder | DINOv3 image against its generation-specific embedder |
-| `auto`          | keyword + E5 + optional SigLIP text/image branches | keyword + E5 + optional DINOv2 image branch | keyword + E5 + optional DINOv3 image branch |
+| Mode            | SigLIP active                                              | DINOv2 active                                         | DINOv3 active                                         |
+| --------------- | ---------------------------------------------------------- | ----------------------------------------------------- | ----------------------------------------------------- |
+| `keyword`       | raw lexical baseline                                       | raw lexical baseline                                  | raw lexical baseline                                  |
+| `text_semantic` | E5 query against `e5_text`                                 | E5 query against `e5_text`                            | E5 query against `e5_text`                            |
+| `text_hybrid`   | separate keyword and E5 branches                           | separate keyword and E5 branches                      | separate keyword and E5 branches                      |
+| `text_visual`   | SigLIP text against its generation-specific image embedder | unavailable                                           | unavailable                                           |
+| `image_visual`  | SigLIP image against its generation-specific embedder      | DINOv2 image against its generation-specific embedder | DINOv3 image against its generation-specific embedder |
+| `auto`          | keyword + E5 + optional SigLIP text/image branches         | keyword + E5 + optional DINOv2 image branch           | keyword + E5 + optional DINOv3 image branch           |
 
 Default auto weights are keyword/E5/SigLIP-text-to-image `0.40/0.40/0.20` for text-only SigLIP queries and keyword/E5/SigLIP-text-to-image/active-image `0.15/0.25/0.10/0.50` for combined SigLIP queries. Both DINO providers drop the incompatible text-to-image branch and retain the keyword, E5, and image weights. Values are relative reciprocal-rank weights, stored as ranking v2 settings in SQLite, and editable in `/admin`; raw scores from different models are never compared directly.
 
@@ -69,7 +185,7 @@ The API checks active index embedders on a short per-index cache. The selected s
 
 ## Index lifecycle
 
-A full build writes current-generation vectors to a run-specific shadow index and generates all three visual providers. Each unique source image is downloaded and normalized at most once per product batch before being shared by SigLIP, DINOv2, DINOv3, and Florence. The bounded libvips stage auto-orients and downsizes oversized sources while preserving aspect ratio; normal inputs pass through unchanged and the inference service retains its independent 25-million-pixel ceiling. Each document also stores `_visualEmbeddingState` with generation, per-model fingerprint, and vector count so matching backfills can resume without treating a changed normalization/crop/pooling profile as complete. Caption cache hits are reused; missing captions are generated in small batches. Input-specific HTTP 422 responses recursively split image and caption batches so one invalid asset cannot discard valid neighbors. A caption or caption-model failure is recorded but the product continues with structured E5 text.
+A full build writes current-generation vectors to a run-specific shadow index and generates all three visual providers. Each unique source image is downloaded and normalized at most once per product batch before being shared by SigLIP, DINOv2, DINOv3, and the configured caption provider. The bounded libvips stage auto-orients and downsizes oversized sources while preserving aspect ratio; normal inputs pass through unchanged and the inference service retains its independent 25-million-pixel ceiling. Each document also stores `_visualEmbeddingState` with generation, per-model fingerprint, and vector count so matching backfills can resume without treating a changed normalization/crop/pooling profile as complete. Caption cache hits are reused; missing captions are generated in small batches. Input-specific HTTP 422 responses recursively split image and caption batches so one invalid asset cannot discard valid neighbors. A caption or caption-model failure is recorded but the product continues with structured E5 text.
 
 Only a complete, count-matched, product-coverage-gated, smoke-tested shadow index swaps into the stable name. Coverage is measured per visual provider as products with at least one successful vector divided by products with at least one selected image; no-image products are excluded and remain searchable through structured text/E5. Stable builds require 95%. Preview builds require 90% and record an Admin warning below the 95% production target. Watermarks use the full-build start time so source changes during a long rebuild are captured by the next incremental. Incremental indexing detects stable generation, rehydrates changed products with the matching preprocessing/embedder names, maintains each registered provider, invalidates captions by content hash/model/task, deletes newly ineligible products, and advances watermarks after success.
 

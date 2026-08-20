@@ -192,12 +192,17 @@ footer {
   font-size: 12px;
   margin-right: 4px;
 }
-.model-switch {
+.provider-switches {
   margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.model-switch {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding-left: 10px;
 }
 .model-switch > span {
   margin-right: 3px;
@@ -1051,6 +1056,11 @@ footer {
     width: 100%;
     margin-left: 0;
     padding: 4px 0 0;
+  }
+  .provider-switches {
+    width: 100%;
+    margin-left: 0;
+    align-items: flex-start;
   }
   .admin-hero h1 {
     font-size: 44px;
